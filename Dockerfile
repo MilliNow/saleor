@@ -27,6 +27,7 @@ RUN apt-get update \
   libgdk-pixbuf2.0-0 \
   shared-mime-info \
   mime-support \
+  procps \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
