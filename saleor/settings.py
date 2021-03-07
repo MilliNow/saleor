@@ -419,6 +419,7 @@ GS_QUERYSTRING_AUTH = get_bool_from_env("GS_QUERYSTRING_AUTH", False)
 GS_DEFAULT_ACL = os.environ.get("GS_DEFAULT_ACL", None)
 GS_MEDIA_CUSTOM_ENDPOINT = os.environ.get("GS_MEDIA_CUSTOM_ENDPOINT", None)
 GS_EXPIRATION = os.environ.get("GS_EXPIRATION", None)
+GS_BUCKET_NAME = GS_STORAGE_BUCKET_NAME
 
 # If GOOGLE_APPLICATION_CREDENTIALS is set there is no need to load OAuth token
 # See https://django-storages.readthedocs.io/en/latest/backends/gcloud.html
