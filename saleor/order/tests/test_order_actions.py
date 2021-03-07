@@ -4,8 +4,10 @@ from unittest.mock import patch
 import pytest
 from prices import Money, TaxedMoney
 
-from ...payment import ChargeStatus, PaymentError
+from ...order import OrderLineData
+from ...payment import ChargeStatus, PaymentError, TransactionKind
 from ...payment.models import Payment
+from ...plugins.manager import get_plugins_manager
 from ...product.models import DigitalContent
 from ...product.tests.utils import create_image
 from ...warehouse.models import Allocation, Stock
@@ -15,7 +17,7 @@ from ..actions import (
     cancel_fulfillment,
     cancel_order,
     clean_mark_order_as_paid,
-    fulfill_order_line,
+    fulfill_order_lines,
     handle_fully_paid_order,
     mark_order_as_paid,
     order_refunded,
@@ -38,17 +40,22 @@ def order_with_digital_line(order, digital_content, stock, site_settings):
     product_type.save()
 
     quantity = 3
-    net = variant.get_price()
+    product = variant.product
+    channel = order.channel
+    variant_channel_listing = variant.channel_listings.get(channel=channel)
+    net = variant.get_price(product, [], channel, variant_channel_listing, None)
     gross = Money(amount=net.amount * Decimal(1.23), currency=net.currency)
+    unit_price = TaxedMoney(net=net, gross=gross)
     line = order.lines.create(
-        product_name=str(variant.product),
+        product_name=str(product),
         variant_name=str(variant),
         product_sku=variant.sku,
         is_shipping_required=variant.is_shipping_required(),
         quantity=quantity,
         variant=variant,
-        unit_price=TaxedMoney(net=net, gross=gross),
-        tax_rate=23,
+        unit_price=unit_price,
+        total_price=unit_price * quantity,
+        tax_rate=Decimal("0.23"),
     )
 
     Allocation.objects.create(order_line=line, stock=stock, quantity_allocated=quantity)
@@ -63,8 +70,10 @@ def test_handle_fully_paid_order_digital_lines(
     mock_send_fulfillment_confirmation,
     order_with_digital_line,
 ):
-
+    redirect_url = "http://localhost.pl"
     order = order_with_digital_line
+    order.redirect_url = redirect_url
+    order.save()
     handle_fully_paid_order(order)
 
     fulfillment = order.fulfillments.first()
@@ -89,7 +98,9 @@ def test_handle_fully_paid_order_digital_lines(
     )
 
     mock_send_payment_confirmation.assert_called_once_with(order.pk)
-    mock_send_fulfillment_confirmation.assert_called_once_with(order.pk, fulfillment.pk)
+    mock_send_fulfillment_confirmation.assert_called_once_with(
+        order.pk, fulfillment.pk, redirect_url
+    )
 
     order.refresh_from_db()
     assert order.status == OrderStatus.FULFILLED
@@ -127,6 +138,23 @@ def test_mark_as_paid(admin_user, draft_order):
     assert payment.charge_status == ChargeStatus.FULLY_CHARGED
     assert payment.captured_amount == draft_order.total.gross.amount
     assert draft_order.events.last().type == (OrderEvents.ORDER_MARKED_AS_PAID)
+    transactions = payment.transactions.all()
+    assert transactions.count() == 1
+    assert transactions[0].kind == TransactionKind.EXTERNAL
+
+
+def test_mark_as_paid_with_external_reference(admin_user, draft_order):
+    external_reference = "transaction_id"
+    mark_order_as_paid(draft_order, admin_user, external_reference=external_reference)
+    payment = draft_order.payments.last()
+    assert payment.charge_status == ChargeStatus.FULLY_CHARGED
+    assert payment.captured_amount == draft_order.total.gross.amount
+    assert draft_order.events.last().type == (OrderEvents.ORDER_MARKED_AS_PAID)
+    transactions = payment.transactions.all()
+    assert transactions.count() == 1
+    assert transactions[0].kind == TransactionKind.EXTERNAL
+    assert transactions[0].searchable_key == external_reference
+    assert transactions[0].token == external_reference
 
 
 def test_mark_as_paid_no_billing_address(admin_user, draft_order):
@@ -205,7 +233,9 @@ def test_cancel_order(
 
 @patch("saleor.order.actions.send_order_refunded_confirmation")
 def test_order_refunded(
-    send_order_refunded_confirmation_mock, order, checkout_with_item,
+    send_order_refunded_confirmation_mock,
+    order,
+    checkout_with_item,
 ):
     # given
     payment = Payment.objects.create(
@@ -214,7 +244,7 @@ def test_order_refunded(
     amount = order.total.gross.amount
 
     # when
-    order_refunded(order, order.user, amount, payment)
+    order_refunded(order, order.user, amount, payment, get_plugins_manager())
 
     # then
     order_event = order.events.last()
@@ -225,7 +255,7 @@ def test_order_refunded(
     )
 
 
-def test_fulfill_order_line(order_with_lines):
+def test_fulfill_order_lines(order_with_lines):
     order = order_with_lines
     line = order.lines.first()
     quantity_fulfilled_before = line.quantity_fulfilled
@@ -233,23 +263,78 @@ def test_fulfill_order_line(order_with_lines):
     stock = Stock.objects.get(product_variant=variant)
     stock_quantity_after = stock.quantity - line.quantity
 
-    fulfill_order_line(line, line.quantity, stock.warehouse.pk)
+    fulfill_order_lines(
+        [
+            OrderLineData(
+                line=line,
+                quantity=line.quantity,
+                variant=variant,
+                warehouse_pk=stock.warehouse.pk,
+            )
+        ],
+    )
 
     stock.refresh_from_db()
     assert stock.quantity == stock_quantity_after
     assert line.quantity_fulfilled == quantity_fulfilled_before + line.quantity
 
 
-def test_fulfill_order_line_with_variant_deleted(order_with_lines):
+def test_fulfill_order_lines_multiply_lines(order_with_lines):
+    order = order_with_lines
+    lines = order.lines.all()
+
+    assert lines.count() > 1
+
+    quantity_fulfilled_before_1 = lines[0].quantity_fulfilled
+    variant_1 = lines[0].variant
+    stock_1 = Stock.objects.get(product_variant=variant_1)
+    stock_quantity_after_1 = stock_1.quantity - lines[0].quantity
+
+    quantity_fulfilled_before_2 = lines[1].quantity_fulfilled
+    variant_2 = lines[1].variant
+    stock_2 = Stock.objects.get(product_variant=variant_2)
+    stock_quantity_after_2 = stock_2.quantity - lines[1].quantity
+
+    fulfill_order_lines(
+        [
+            OrderLineData(
+                line=lines[0],
+                quantity=lines[0].quantity,
+                variant=variant_1,
+                warehouse_pk=stock_1.warehouse.pk,
+            ),
+            OrderLineData(
+                line=lines[1],
+                quantity=lines[1].quantity,
+                variant=variant_2,
+                warehouse_pk=stock_2.warehouse.pk,
+            ),
+        ],
+    )
+
+    stock_1.refresh_from_db()
+    assert stock_1.quantity == stock_quantity_after_1
+    assert (
+        lines[0].quantity_fulfilled == quantity_fulfilled_before_1 + lines[0].quantity
+    )
+
+    stock_2.refresh_from_db()
+    assert stock_2.quantity == stock_quantity_after_2
+    assert (
+        lines[1].quantity_fulfilled == quantity_fulfilled_before_2 + lines[1].quantity
+    )
+
+
+def test_fulfill_order_lines_with_variant_deleted(order_with_lines):
     line = order_with_lines.lines.first()
     line.variant.delete()
 
     line.refresh_from_db()
 
-    fulfill_order_line(line, line.quantity, "warehouse_pk")
+    fulfill_order_lines([OrderLineData(line=line, quantity=line.quantity)])
 
 
-def test_fulfill_order_line_without_inventory_tracking(order_with_lines):
+def test_fulfill_order_lines_without_inventory_tracking(order_with_lines):
     order = order_with_lines
     line = order.lines.first()
     quantity_fulfilled_before = line.quantity_fulfilled
@@ -261,7 +346,16 @@ def test_fulfill_order_line_without_inventory_tracking(order_with_lines):
     # stock should not change
     stock_quantity_after = stock.quantity
 
-    fulfill_order_line(line, line.quantity, stock.warehouse.pk)
+    fulfill_order_lines(
+        [
+            OrderLineData(
+                line=line,
+                quantity=line.quantity,
+                variant=variant,
+                warehouse_pk=stock.warehouse.pk,
+            )
+        ]
+    )
 
     stock.refresh_from_db()
     assert stock.quantity == stock_quantity_after

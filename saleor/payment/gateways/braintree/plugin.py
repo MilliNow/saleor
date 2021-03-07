@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, List
 
 from saleor.plugins.base_plugin import BasePlugin, ConfigurationTypeField
 
-from ..utils import get_supported_currencies
+from ..utils import get_supported_currencies, require_active_plugin
 from . import (
     GatewayConfig,
     authorize,
@@ -18,18 +18,8 @@ GATEWAY_NAME = "Braintree"
 
 if TYPE_CHECKING:
     # flake8: noqa
-    from . import GatewayResponse, PaymentData, TokenConfig
     from ...interface import CustomerSource
-
-
-def require_active_plugin(fn):
-    def wrapped(self, *args, **kwargs):
-        previous = kwargs.get("previous_value", None)
-        if not self.active:
-            return previous
-        return fn(self, *args, **kwargs)
-
-    return wrapped
+    from . import GatewayResponse, PaymentData, TokenConfig
 
 
 class BraintreeGatewayPlugin(BasePlugin):

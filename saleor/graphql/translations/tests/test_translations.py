@@ -2,17 +2,86 @@ import graphene
 import pytest
 from django.contrib.auth.models import Permission
 
+from ....tests.utils import dummy_editorjs
 from ...tests.utils import assert_no_permission, get_graphql_content
 from ..schema import TranslatableKinds
 from ..types import LanguageCodeEnum
 
 
-def test_product_translation(user_api_client, product):
+def test_product_translation(user_api_client, product, channel_USD):
+    description = dummy_editorjs("test desription")
+    product.translations.create(
+        language_code="pl", name="Produkt", description=description
+    )
+
+    query = """
+    query productById($productId: ID!, $channel: String) {
+        product(id: $productId, channel: $channel) {
+            translation(languageCode: PL) {
+                name
+                description
+                descriptionJson
+                language {
+                    code
+                }
+            }
+        }
+    }
+    """
+
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    response = user_api_client.post_graphql(
+        query, {"productId": product_id, "channel": channel_USD.slug}
+    )
+    data = get_graphql_content(response)["data"]
+
+    translation_data = data["product"]["translation"]
+    assert translation_data["name"] == "Produkt"
+    assert translation_data["language"]["code"] == "PL"
+    assert (
+        translation_data["description"]
+        == translation_data["descriptionJson"]
+        == dummy_editorjs("test desription", json_format=True)
+    )
+
+
+def test_product_translation_without_description(user_api_client, product, channel_USD):
     product.translations.create(language_code="pl", name="Produkt")
 
     query = """
-    query productById($productId: ID!) {
-        product(id: $productId) {
+    query productById($productId: ID!, $channel: String) {
+        product(id: $productId, channel: $channel) {
+            translation(languageCode: PL) {
+                name
+                description
+                descriptionJson
+                language {
+                    code
+                }
+            }
+        }
+    }
+    """
+
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    response = user_api_client.post_graphql(
+        query, {"productId": product_id, "channel": channel_USD.slug}
+    )
+    data = get_graphql_content(response)["data"]
+
+    translation_data = data["product"]["translation"]
+    assert translation_data["name"] == "Produkt"
+    assert translation_data["language"]["code"] == "PL"
+    assert translation_data["description"] is None
+    assert translation_data["descriptionJson"] == "{}"
+
+
+def test_product_translation_with_app(app_api_client, product, channel_USD):
+    product.translations.create(language_code="pl", name="Produkt")
+
+    query = """
+    query productById($productId: ID!, $channel: String) {
+        product(id: $productId, channel: $channel) {
             translation(languageCode: PL) {
                 name
                 language {
@@ -24,19 +93,21 @@ def test_product_translation(user_api_client, product):
     """
 
     product_id = graphene.Node.to_global_id("Product", product.id)
-    response = user_api_client.post_graphql(query, {"productId": product_id})
+    response = app_api_client.post_graphql(
+        query, {"productId": product_id, "channel": channel_USD.slug}
+    )
     data = get_graphql_content(response)["data"]
 
     assert data["product"]["translation"]["name"] == "Produkt"
     assert data["product"]["translation"]["language"]["code"] == "PL"
 
 
-def test_product_variant_translation(user_api_client, variant):
+def test_product_variant_translation(user_api_client, variant, channel_USD):
     variant.translations.create(language_code="pl", name="Wariant")
 
     query = """
-    query productVariantById($productVariantId: ID!) {
-        productVariant(id: $productVariantId) {
+    query productVariantById($productVariantId: ID!, $channel: String) {
+        productVariant(id: $productVariantId, channel: $channel) {
             translation(languageCode: PL) {
                 name
                 language {
@@ -49,7 +120,7 @@ def test_product_variant_translation(user_api_client, variant):
 
     product_variant_id = graphene.Node.to_global_id("ProductVariant", variant.id)
     response = user_api_client.post_graphql(
-        query, {"productVariantId": product_variant_id}
+        query, {"productVariantId": product_variant_id, "channel": channel_USD.slug}
     )
     data = get_graphql_content(response)["data"]
 
@@ -57,14 +128,19 @@ def test_product_variant_translation(user_api_client, variant):
     assert data["productVariant"]["translation"]["language"]["code"] == "PL"
 
 
-def test_collection_translation(user_api_client, collection):
-    collection.translations.create(language_code="pl", name="Kolekcja")
+def test_collection_translation(user_api_client, published_collection, channel_USD):
+    description = dummy_editorjs("test desription")
+    published_collection.translations.create(
+        language_code="pl", name="Kolekcja", description=description
+    )
 
     query = """
-    query collectionById($collectionId: ID!) {
-        collection(id: $collectionId) {
+    query collectionById($collectionId: ID!, $channel: String) {
+        collection(id: $collectionId, channel: $channel) {
             translation(languageCode: PL) {
                 name
+                description
+                descriptionJson
                 language {
                     code
                 }
@@ -73,22 +149,66 @@ def test_collection_translation(user_api_client, collection):
     }
     """
 
-    collection_id = graphene.Node.to_global_id("Collection", collection.id)
-    response = user_api_client.post_graphql(query, {"collectionId": collection_id})
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
+    variables = {"collectionId": collection_id, "channel": channel_USD.slug}
+    response = user_api_client.post_graphql(query, variables)
     data = get_graphql_content(response)["data"]
 
-    assert data["collection"]["translation"]["name"] == "Kolekcja"
-    assert data["collection"]["translation"]["language"]["code"] == "PL"
+    translation_data = data["collection"]["translation"]
+    assert translation_data["name"] == "Kolekcja"
+    assert translation_data["language"]["code"] == "PL"
+    assert (
+        translation_data["description"]
+        == translation_data["descriptionJson"]
+        == dummy_editorjs("test desription", json_format=True)
+    )
+
+
+def test_collection_translation_without_description(
+    user_api_client, published_collection, channel_USD
+):
+    published_collection.translations.create(language_code="pl", name="Kolekcja")
+
+    query = """
+    query collectionById($collectionId: ID!, $channel: String) {
+        collection(id: $collectionId, channel: $channel) {
+            translation(languageCode: PL) {
+                name
+                description
+                descriptionJson
+                language {
+                    code
+                }
+            }
+        }
+    }
+    """
+
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
+    variables = {"collectionId": collection_id, "channel": channel_USD.slug}
+    response = user_api_client.post_graphql(query, variables)
+    data = get_graphql_content(response)["data"]
+
+    translation_data = data["collection"]["translation"]
+    assert translation_data["name"] == "Kolekcja"
+    assert translation_data["language"]["code"] == "PL"
+    assert translation_data["description"] is None
+    assert translation_data["descriptionJson"] == "{}"
 
 
 def test_category_translation(user_api_client, category):
-    category.translations.create(language_code="pl", name="Kategoria")
+    description = dummy_editorjs("test description")
+    category.translations.create(
+        language_code="pl", name="Kategoria", description=description
+    )
 
     query = """
     query categoryById($categoryId: ID!) {
         category(id: $categoryId) {
             translation(languageCode: PL) {
                 name
+                description
+                descriptionJson
                 language {
                     code
                 }
@@ -101,8 +221,43 @@ def test_category_translation(user_api_client, category):
     response = user_api_client.post_graphql(query, {"categoryId": category_id})
     data = get_graphql_content(response)["data"]
 
-    assert data["category"]["translation"]["name"] == "Kategoria"
-    assert data["category"]["translation"]["language"]["code"] == "PL"
+    translation_data = data["category"]["translation"]
+    assert translation_data["name"] == "Kategoria"
+    assert translation_data["language"]["code"] == "PL"
+    assert (
+        translation_data["description"]
+        == translation_data["descriptionJson"]
+        == dummy_editorjs("test description", json_format=True)
+    )
+
+
+def test_category_translation_without_description(user_api_client, category):
+    category.translations.create(language_code="pl", name="Kategoria")
+
+    query = """
+    query categoryById($categoryId: ID!) {
+        category(id: $categoryId) {
+            translation(languageCode: PL) {
+                name
+                description
+                descriptionJson
+                language {
+                    code
+                }
+            }
+        }
+    }
+    """
+
+    category_id = graphene.Node.to_global_id("Category", category.id)
+    response = user_api_client.post_graphql(query, {"categoryId": category_id})
+    data = get_graphql_content(response)["data"]
+
+    translation_data = data["category"]["translation"]
+    assert translation_data["name"] == "Kategoria"
+    assert translation_data["language"]["code"] == "PL"
+    assert translation_data["description"] is None
+    assert translation_data["descriptionJson"] == "{}"
 
 
 def test_voucher_translation(staff_api_client, voucher, permission_manage_discounts):
@@ -158,13 +313,16 @@ def test_sale_translation(staff_api_client, sale, permission_manage_discounts):
 
 
 def test_page_translation(user_api_client, page):
-    page.translations.create(language_code="pl", title="Strona")
+    content = dummy_editorjs("test content")
+    page.translations.create(language_code="pl", title="Strona", content=content)
 
     query = """
     query pageById($pageId: ID!) {
         page(id: $pageId) {
             translation(languageCode: PL) {
                 title
+                content
+                contentJson
                 language {
                     code
                 }
@@ -177,8 +335,43 @@ def test_page_translation(user_api_client, page):
     response = user_api_client.post_graphql(query, {"pageId": page_id})
     data = get_graphql_content(response)["data"]
 
-    assert data["page"]["translation"]["title"] == "Strona"
-    assert data["page"]["translation"]["language"]["code"] == "PL"
+    translation_data = data["page"]["translation"]
+    assert translation_data["title"] == "Strona"
+    assert translation_data["language"]["code"] == "PL"
+    assert (
+        translation_data["content"]
+        == translation_data["contentJson"]
+        == dummy_editorjs("test content", json_format=True)
+    )
+
+
+def test_page_translation_without_content(user_api_client, page):
+    page.translations.create(language_code="pl", title="Strona")
+
+    query = """
+    query pageById($pageId: ID!) {
+        page(id: $pageId) {
+            translation(languageCode: PL) {
+                title
+                content
+                contentJson
+                language {
+                    code
+                }
+            }
+        }
+    }
+    """
+
+    page_id = graphene.Node.to_global_id("Page", page.id)
+    response = user_api_client.post_graphql(query, {"pageId": page_id})
+    data = get_graphql_content(response)["data"]
+
+    translation_data = data["page"]["translation"]
+    assert translation_data["title"] == "Strona"
+    assert translation_data["language"]["code"] == "PL"
+    assert translation_data["content"] is None
+    assert translation_data["contentJson"] == "{}"
 
 
 def test_attribute_translation(user_api_client, color_attribute):
@@ -326,10 +519,10 @@ def test_shop_translation(user_api_client, site_settings):
     assert data["shop"]["translation"]["language"]["code"] == "PL"
 
 
-def test_product_no_translation(user_api_client, product):
+def test_product_no_translation(user_api_client, product, channel_USD):
     query = """
-    query productById($productId: ID!) {
-        product(id: $productId) {
+    query productById($productId: ID!, $channel: String) {
+        product(id: $productId, channel: $channel) {
             translation(languageCode: PL) {
                 name
                 language {
@@ -341,16 +534,18 @@ def test_product_no_translation(user_api_client, product):
     """
 
     product_id = graphene.Node.to_global_id("Product", product.id)
-    response = user_api_client.post_graphql(query, {"productId": product_id})
+    response = user_api_client.post_graphql(
+        query, {"productId": product_id, "channel": channel_USD.slug}
+    )
     data = get_graphql_content(response)["data"]
 
     assert data["product"]["translation"] is None
 
 
-def test_product_variant_no_translation(user_api_client, variant):
+def test_product_variant_no_translation(user_api_client, variant, channel_USD):
     query = """
-    query productVariantById($productVariantId: ID!) {
-        productVariant(id: $productVariantId) {
+    query productVariantById($productVariantId: ID!, $channel: String) {
+        productVariant(id: $productVariantId, channel: $channel) {
             translation(languageCode: PL) {
                 name
                 language {
@@ -363,17 +558,17 @@ def test_product_variant_no_translation(user_api_client, variant):
 
     product_variant_id = graphene.Node.to_global_id("ProductVariant", variant.id)
     response = user_api_client.post_graphql(
-        query, {"productVariantId": product_variant_id}
+        query, {"productVariantId": product_variant_id, "channel": channel_USD.slug}
     )
     data = get_graphql_content(response)["data"]
 
     assert data["productVariant"]["translation"] is None
 
 
-def test_collection_no_translation(user_api_client, collection):
+def test_collection_no_translation(user_api_client, published_collection, channel_USD):
     query = """
-    query collectionById($collectionId: ID!) {
-        collection(id: $collectionId) {
+    query collectionById($collectionId: ID!, $channel: String) {
+        collection(id: $collectionId, channel: $channel) {
             translation(languageCode: PL) {
                 name
                 language {
@@ -384,8 +579,9 @@ def test_collection_no_translation(user_api_client, collection):
     }
     """
 
-    collection_id = graphene.Node.to_global_id("Collection", collection.id)
-    response = user_api_client.post_graphql(query, {"collectionId": collection_id})
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
+    variables = {"collectionId": collection_id, "channel": channel_USD.slug}
+    response = user_api_client.post_graphql(query, variables)
     data = get_graphql_content(response)["data"]
 
     assert data["collection"]["translation"] is None
@@ -616,6 +812,36 @@ def test_product_create_translation(
     assert data["product"]["translation"]["language"]["code"] == "PL"
 
 
+def test_product_create_translation_with_app(
+    app_api_client, product, permission_manage_translations
+):
+    query = """
+    mutation productTranslate($productId: ID!) {
+        productTranslate(
+                id: $productId, languageCode: PL,
+                input: {name: "Produkt PL"}) {
+            product {
+                translation(languageCode: PL) {
+                    name
+                    language {
+                        code
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    response = app_api_client.post_graphql(
+        query, {"productId": product_id}, permissions=[permission_manage_translations]
+    )
+    data = get_graphql_content(response)["data"]["productTranslate"]
+
+    assert data["product"]["translation"]["name"] == "Produkt PL"
+    assert data["product"]["translation"]["language"]["code"] == "PL"
+
+
 def test_product_update_translation(
     staff_api_client, product, permission_manage_translations
 ):
@@ -715,7 +941,7 @@ def test_product_variant_update_translation(
 
 
 def test_collection_create_translation(
-    staff_api_client, collection, permission_manage_translations
+    staff_api_client, published_collection, permission_manage_translations
 ):
     query = """
     mutation collectionTranslate($collectionId: ID!) {
@@ -734,7 +960,7 @@ def test_collection_create_translation(
     }
     """
 
-    collection_id = graphene.Node.to_global_id("Collection", collection.id)
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
     response = staff_api_client.post_graphql(
         query,
         {"collectionId": collection_id},
@@ -747,9 +973,9 @@ def test_collection_create_translation(
 
 
 def test_collection_update_translation(
-    staff_api_client, collection, permission_manage_translations
+    staff_api_client, published_collection, permission_manage_translations
 ):
-    collection.translations.create(language_code="pl", name="Kolekcja")
+    published_collection.translations.create(language_code="pl", name="Kolekcja")
 
     query = """
     mutation collectionTranslate($collectionId: ID!) {
@@ -768,7 +994,7 @@ def test_collection_update_translation(
     }
     """
 
-    collection_id = graphene.Node.to_global_id("Collection", collection.id)
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
     response = staff_api_client.post_graphql(
         query,
         {"collectionId": collection_id},
@@ -1309,9 +1535,10 @@ def test_shop_update_translation(
     ],
 )
 def test_translations_query(
-    user_api_client,
+    staff_api_client,
+    permission_manage_translations,
     product,
-    collection,
+    published_collection,
     voucher,
     sale,
     shipping_method,
@@ -1332,13 +1559,17 @@ def test_translations_query(
     }
     """
 
-    response = user_api_client.post_graphql(query, {"kind": kind.name})
+    response = staff_api_client.post_graphql(
+        query, {"kind": kind.name}, permissions=[permission_manage_translations]
+    )
     data = get_graphql_content(response)["data"]["translations"]
 
     assert data["edges"][0]["node"]["__typename"] == expected_typename
 
 
-def test_translations_query_inline_fragment(user_api_client, product):
+def test_translations_query_inline_fragment(
+    staff_api_client, permission_manage_translations, product
+):
     product.translations.create(language_code="pl", name="Produkt testowy")
 
     query = """
@@ -1358,7 +1589,9 @@ def test_translations_query_inline_fragment(user_api_client, product):
     }
     """
 
-    response = user_api_client.post_graphql(query)
+    response = staff_api_client.post_graphql(
+        query, permissions=[permission_manage_translations]
+    )
     data = get_graphql_content(response)["data"]["translations"]["edges"][0]
 
     assert data["node"]["name"] == "Test product"
@@ -1387,27 +1620,14 @@ QUERY_TRANSLATION_PRODUCT = """
 """
 
 
-@pytest.mark.parametrize(
-    "is_published, perm_codenames, return_product",
-    [
-        (True, ["manage_translations"], True),
-        (False, ["manage_translations"], False),
-        (False, ["manage_translations", "manage_products"], True),
-    ],
-)
 def test_translation_query_product(
     staff_api_client,
+    permission_manage_translations,
     product,
     product_translation_fr,
-    is_published,
-    perm_codenames,
-    return_product,
 ):
-    product.is_published = is_published
-    product.save()
 
     product_id = graphene.Node.to_global_id("Product", product.id)
-    perms = list(Permission.objects.filter(codename__in=perm_codenames))
 
     variables = {
         "id": product_id,
@@ -1415,16 +1635,15 @@ def test_translation_query_product(
         "languageCode": LanguageCodeEnum.FR.name,
     }
     response = staff_api_client.post_graphql(
-        QUERY_TRANSLATION_PRODUCT, variables, permissions=perms
+        QUERY_TRANSLATION_PRODUCT,
+        variables,
+        permissions=[permission_manage_translations],
     )
     content = get_graphql_content(response)
     data = content["data"]["translation"]
     assert data["name"] == product.name
     assert data["translation"]["name"] == product_translation_fr.name
-    if return_product:
-        assert data["product"]["name"] == product.name
-    else:
-        assert not data["product"]
+    assert data["product"]["name"] == product.name
 
 
 QUERY_TRANSLATION_COLLECTION = """
@@ -1449,27 +1668,17 @@ QUERY_TRANSLATION_COLLECTION = """
 """
 
 
-@pytest.mark.parametrize(
-    "is_published, perm_codenames, return_collection",
-    [
-        (True, ["manage_translations"], True),
-        (False, ["manage_translations"], False),
-        (False, ["manage_translations", "manage_products"], True),
-    ],
-)
 def test_translation_query_collection(
     staff_api_client,
-    collection,
+    published_collection,
     collection_translation_fr,
-    is_published,
-    perm_codenames,
-    return_collection,
+    permission_manage_translations,
+    channel_USD,
 ):
-    collection.is_published = is_published
-    collection.save()
 
-    collection_id = graphene.Node.to_global_id("Collection", collection.id)
-    perms = list(Permission.objects.filter(codename__in=perm_codenames))
+    channel_listing = published_collection.channel_listings.get()
+    channel_listing.save()
+    collection_id = graphene.Node.to_global_id("Collection", published_collection.id)
 
     variables = {
         "id": collection_id,
@@ -1477,16 +1686,15 @@ def test_translation_query_collection(
         "languageCode": LanguageCodeEnum.FR.name,
     }
     response = staff_api_client.post_graphql(
-        QUERY_TRANSLATION_COLLECTION, variables, permissions=perms
+        QUERY_TRANSLATION_COLLECTION,
+        variables,
+        permissions=[permission_manage_translations],
     )
     content = get_graphql_content(response)
     data = content["data"]["translation"]
-    assert data["name"] == collection.name
+    assert data["name"] == published_collection.name
     assert data["translation"]["name"] == collection_translation_fr.name
-    if return_collection:
-        assert data["collection"]["name"] == collection.name
-    else:
-        assert not data["collection"]
+    assert data["collection"]["name"] == published_collection.name
 
 
 QUERY_TRANSLATION_CATEGORY = """
@@ -1649,45 +1857,29 @@ QUERY_TRANSLATION_VARIANT = """
 """
 
 
-@pytest.mark.parametrize(
-    "is_published, perm_codenames, return_variant",
-    [
-        (True, ["manage_translations"], True),
-        (False, ["manage_translations"], False),
-        (False, ["manage_translations", "manage_products"], True),
-    ],
-)
 def test_translation_query_variant(
     staff_api_client,
+    permission_manage_translations,
     product,
     variant,
     variant_translation_fr,
-    is_published,
-    perm_codenames,
-    return_variant,
 ):
-    product.is_published = is_published
-    product.save()
-
     variant_id = graphene.Node.to_global_id("ProductVariant", variant.id)
-    perms = list(Permission.objects.filter(codename__in=perm_codenames))
-
     variables = {
         "id": variant_id,
         "kind": TranslatableKinds.VARIANT.name,
         "languageCode": LanguageCodeEnum.FR.name,
     }
     response = staff_api_client.post_graphql(
-        QUERY_TRANSLATION_VARIANT, variables, permissions=perms
+        QUERY_TRANSLATION_VARIANT,
+        variables,
+        permissions=[permission_manage_translations],
     )
     content = get_graphql_content(response)
     data = content["data"]["translation"]
     assert data["name"] == variant.name
     assert data["translation"]["name"] == variant_translation_fr.name
-    if return_variant:
-        assert data["productVariant"]["name"] == variant.name
-    else:
-        assert not data["productVariant"]
+    assert data["productVariant"]["name"] == variant.name
 
 
 QUERY_TRANSLATION_PAGE = """
@@ -1713,11 +1905,11 @@ QUERY_TRANSLATION_PAGE = """
 
 
 @pytest.mark.parametrize(
-    "is_published, perm_codenames, return_page",
+    "is_published, perm_codenames",
     [
-        (True, ["manage_translations"], True),
-        (False, ["manage_translations"], False),
-        (False, ["manage_translations", "manage_pages"], True),
+        (True, ["manage_translations"]),
+        (False, ["manage_translations"]),
+        (False, ["manage_translations", "manage_pages"]),
     ],
 )
 def test_translation_query_page(
@@ -1726,7 +1918,6 @@ def test_translation_query_page(
     page_translation_fr,
     is_published,
     perm_codenames,
-    return_page,
 ):
     page.is_published = is_published
     page.save()
@@ -1746,10 +1937,7 @@ def test_translation_query_page(
     data = content["data"]["translation"]
     assert data["title"] == page.title
     assert data["translation"]["title"] == page_translation_fr.title
-    if return_page:
-        assert data["page"]["title"] == page.title
-    else:
-        assert not data["page"]
+    assert data["page"]["title"] == page.title
 
 
 QUERY_TRANSLATION_SHIPPING_METHOD = """

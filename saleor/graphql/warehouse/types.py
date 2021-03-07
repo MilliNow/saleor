@@ -5,8 +5,10 @@ from django.db.models.functions import Coalesce
 from ...core.permissions import OrderPermissions, ProductPermissions
 from ...warehouse import models
 from ..account.enums import CountryCodeEnum
+from ..channel import ChannelContext
 from ..core.connection import CountableDjangoObjectType
 from ..decorators import one_of_permissions_required
+from ..meta.types import ObjectWithMetadata
 
 
 class WarehouseAddressInput(graphene.InputObjectType):
@@ -47,7 +49,7 @@ class Warehouse(CountableDjangoObjectType):
     class Meta:
         description = "Represents warehouse."
         model = models.Warehouse
-        interfaces = [graphene.relay.Node]
+        interfaces = [graphene.relay.Node, ObjectWithMetadata]
         only_fields = [
             "id",
             "name",
@@ -57,6 +59,15 @@ class Warehouse(CountableDjangoObjectType):
             "address",
             "email",
         ]
+
+    @staticmethod
+    def resolve_shipping_zones(root, *_args, **_kwargs):
+        instances = root.shipping_zones.all()
+        shipping_zones = [
+            ChannelContext(node=shipping_zone, channel_slug=None)
+            for shipping_zone in instances
+        ]
+        return shipping_zones
 
 
 class Stock(CountableDjangoObjectType):
@@ -90,6 +101,10 @@ class Stock(CountableDjangoObjectType):
         return root.allocations.aggregate(
             quantity_allocated=Coalesce(Sum("quantity_allocated"), 0)
         )["quantity_allocated"]
+
+    @staticmethod
+    def resolve_product_variant(root, *_args):
+        return ChannelContext(node=root.product_variant, channel_slug=None)
 
 
 class Allocation(CountableDjangoObjectType):

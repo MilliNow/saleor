@@ -102,10 +102,10 @@ class Payment(models.Model):
         return max(self.transactions.all(), default=None, key=attrgetter("pk"))
 
     def get_total(self):
-        return Money(self.total, self.currency or settings.DEFAULT_CURRENCY)
+        return Money(self.total, self.currency)
 
     def get_authorized_amount(self):
-        money = zero_money()
+        money = zero_money(self.currency)
 
         # Query all the transactions which should be prefetched
         # to optimize db queries
@@ -132,14 +132,14 @@ class Payment(models.Model):
 
         # Calculate authorized amount from all succeeded auth transactions
         for txn in authorized_txns:
-            money += Money(txn.amount, self.currency or settings.DEFAULT_CURRENCY)
+            money += Money(txn.amount, self.currency)
 
         # If multiple partial capture is supported later though it's unlikely,
         # the authorized amount should exclude the already captured amount here
         return money
 
     def get_captured_amount(self):
-        return Money(self.captured_amount, self.currency or settings.DEFAULT_CURRENCY)
+        return Money(self.captured_amount, self.currency)
 
     def get_charge_amount(self):
         """Retrieve the maximum capture possible."""
@@ -177,14 +177,13 @@ class Payment(models.Model):
             ChargeStatus.FULLY_CHARGED,
             ChargeStatus.PARTIALLY_REFUNDED,
         )
-        return (
-            self.is_active
-            and self.charge_status in can_refund_charge_status
-            and self.gateway != CustomPaymentChoices.MANUAL
-        )
+        return self.is_active and self.charge_status in can_refund_charge_status
 
     def can_confirm(self):
         return self.is_active and self.not_charged
+
+    def is_manual(self):
+        return self.gateway == CustomPaymentChoices.MANUAL
 
 
 class Transaction(models.Model):
@@ -232,4 +231,4 @@ class Transaction(models.Model):
         )
 
     def get_amount(self):
-        return Money(self.amount, self.currency or settings.DEFAULT_CURRENCY)
+        return Money(self.amount, self.currency)

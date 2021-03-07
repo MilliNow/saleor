@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 from typing import TYPE_CHECKING, Optional, Type, Union
 from urllib.parse import urljoin
@@ -9,14 +10,10 @@ from django.contrib.sites.models import Site
 from django.db.models import Model
 from django.utils.encoding import iri_to_uri
 from django.utils.text import slugify
-from django_countries import countries
-from django_countries.fields import Country
 from django_prices_openexchangerates import exchange_currency
-from geolite2 import geolite2
 from prices import MoneyRange
 from versatileimagefield.image_warmer import VersatileImageFieldWarmer
 
-georeader = geolite2.reader()
 logger = logging.getLogger(__name__)
 
 
@@ -73,27 +70,11 @@ def is_valid_ipv6(ip: str) -> bool:
     return True
 
 
-def _get_geo_data_by_ip(ip_address):
-    # This function is here to make it easier to mock the GeoIP
-    # as the georeader object below can be a native platform library
-    # that does not support monkeypatching.
-    return georeader.get(ip_address)
-
-
-def get_country_by_ip(ip_address):
-    geo_data = _get_geo_data_by_ip(ip_address)
-    if geo_data and "country" in geo_data and "iso_code" in geo_data["country"]:
-        country_iso_code = geo_data["country"]["iso_code"]
-        if country_iso_code in countries:
-            return Country(country_iso_code)
-    return None
-
-
-def get_currency_for_country(country):
-    currencies = get_territory_currencies(country.code)
+def get_currency_for_country(country_code: str):
+    currencies = get_territory_currencies(country_code)
     if currencies:
         return currencies[0]
-    return settings.DEFAULT_CURRENCY
+    return os.environ.get("DEFAULT_CURRENCY", "USD")
 
 
 def to_local_currency(price, currency):
@@ -133,7 +114,9 @@ def create_thumbnails(pk, model, size_set, image_attr=None):
 
 
 def generate_unique_slug(
-    instance: Type[Model], slugable_value: str, slug_field_name: str = "slug",
+    instance: Type[Model],
+    slugable_value: str,
+    slug_field_name: str = "slug",
 ) -> str:
     """Create unique slug for model instance.
 
@@ -156,9 +139,7 @@ def generate_unique_slug(
     search_field = f"{slug_field_name}__iregex"
     pattern = rf"{slug}-\d+$|{slug}$"
     slug_values = (
-        ModelClass._default_manager.filter(  # type: ignore
-            **{search_field: pattern}
-        )
+        ModelClass._default_manager.filter(**{search_field: pattern})  # type: ignore
         .exclude(pk=instance.pk)
         .values_list(slug_field_name, flat=True)
     )

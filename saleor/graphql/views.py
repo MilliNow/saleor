@@ -1,4 +1,5 @@
 import fnmatch
+import hashlib
 import json
 import logging
 import traceback
@@ -7,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import opentracing
 import opentracing.tags
 from django.conf import settings
+from django.core.cache import cache
 from django.db import connection
 from django.db.backends.postgresql.base import DatabaseWrapper
 from django.http import HttpRequest, HttpResponseNotAllowed, JsonResponse
@@ -17,14 +19,12 @@ from django.views.generic import View
 from graphene_django.settings import graphene_settings
 from graphene_django.views import instantiate_middleware
 from graphql import GraphQLDocument, get_default_backend
-from graphql.error import (
-    GraphQLError,
-    GraphQLSyntaxError,
-    format_error as format_graphql_error,
-)
+from graphql.error import GraphQLError, GraphQLSyntaxError
+from graphql.error import format_error as format_graphql_error
 from graphql.execution import ExecutionResult
 from jwt.exceptions import PyJWTError
 
+from .. import __version__ as saleor_version
 from ..core.exceptions import PermissionDenied, ReadOnlyException
 from ..core.utils import is_valid_ipv4, is_valid_ipv6
 
@@ -42,6 +42,10 @@ def tracing_wrapper(execute, sql, params, many, context):
         span.set_tag(opentracing.tags.COMPONENT, "db")
         span.set_tag(opentracing.tags.DATABASE_STATEMENT, sql)
         span.set_tag(opentracing.tags.DATABASE_TYPE, conn.display_name)
+        span.set_tag(opentracing.tags.PEER_HOSTNAME, conn.settings_dict.get("HOST"))
+        span.set_tag(opentracing.tags.PEER_PORT, conn.settings_dict.get("PORT"))
+        span.set_tag("service.name", "postgres")
+        span.set_tag("span.type", "sql")
         return execute(sql, params, many, context)
 
 
@@ -137,6 +141,7 @@ class GraphQLView(View):
                 opentracing.tags.HTTP_URL,
                 request.build_absolute_uri(request.get_full_path()),
             )
+            span.set_tag("span.type", "web")
 
             request_ips = request.META.get(settings.REAL_IP_ENVIRON, "")
             for ip in request_ips.split(","):
@@ -204,13 +209,25 @@ class GraphQLView(View):
         # Attempt to parse the query, if it fails, return the error
         try:
             return (
-                self.backend.document_from_string(  # type: ignore
-                    self.schema, query
-                ),
+                self.backend.document_from_string(self.schema, query),  # type: ignore
                 None,
             )
         except (ValueError, GraphQLSyntaxError) as e:
             return None, ExecutionResult(errors=[e], invalid=True)
+
+    def check_if_query_contains_only_schema(self, document: GraphQLDocument):
+        query_with_schema = False
+        for definition in document.document_ast.definitions:
+            selections = definition.selection_set.selections
+            selection_count = len(selections)
+            for selection in selections:
+                selection_name = str(selection.name.value)
+                if selection_name == "__schema":
+                    query_with_schema = True
+                    if selection_count > 1:
+                        msg = "`__schema` must be fetched in separete query"
+                        raise GraphQLError(msg)
+        return query_with_schema
 
     def execute_graphql_request(self, request: HttpRequest, data: dict):
         with opentracing.global_tracer().start_active_span("graphql_query") as scope:
@@ -224,10 +241,14 @@ class GraphQLView(View):
                 return error
 
             if document is not None:
-                raw_query_string = document.document_string[
-                    : settings.OPENTRACING_MAX_QUERY_LENGTH_LOG
-                ]
+                raw_query_string = document.document_string
                 span.set_tag("graphql.query", raw_query_string)
+                try:
+                    query_contains_schema = self.check_if_query_contains_only_schema(
+                        document
+                    )
+                except GraphQLError as e:
+                    return ExecutionResult(errors=[e], invalid=True)
 
             extra_options: Dict[str, Optional[Any]] = {}
 
@@ -237,14 +258,26 @@ class GraphQLView(View):
                 extra_options["executor"] = self.executor
             try:
                 with connection.execute_wrapper(tracing_wrapper):
-                    return document.execute(  # type: ignore
-                        root=self.get_root_value(),
-                        variables=variables,
-                        operation_name=operation_name,
-                        context=request,
-                        middleware=self.middleware,
-                        **extra_options,
+                    response = None
+                    should_use_cache_for_scheme = query_contains_schema & (
+                        not settings.DEBUG
                     )
+                    if should_use_cache_for_scheme:
+                        key = generate_cache_key(raw_query_string)
+                        response = cache.get(key)
+
+                    if not response:
+                        response = document.execute(  # type: ignore
+                            root=self.get_root_value(),
+                            variables=variables,
+                            operation_name=operation_name,
+                            context=request,
+                            middleware=self.middleware,
+                            **extra_options,
+                        )
+                        if should_use_cache_for_scheme:
+                            cache.set(key, response)
+                    return response
             except Exception as e:
                 span.set_tag(opentracing.tags.ERROR, True)
                 return ExecutionResult(errors=[e], invalid=True)
@@ -353,3 +386,8 @@ def obj_set(obj, path, value, do_not_replace):
         except IndexError:
             pass
     return obj_set(obj[current_path], path[1:], value, do_not_replace)
+
+
+def generate_cache_key(raw_query: str) -> str:
+    hashed_query = hashlib.sha256(str(raw_query).encode("utf-8")).hexdigest()
+    return f"{saleor_version}-{hashed_query}"

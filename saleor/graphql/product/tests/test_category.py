@@ -1,4 +1,3 @@
-import json
 from unittest.mock import Mock, patch
 
 import graphene
@@ -7,12 +6,13 @@ from django.utils.text import slugify
 from graphql_relay import to_global_id
 
 from ....product.error_codes import ProductErrorCode
-from ....product.models import Category, Product
+from ....product.models import Category, Product, ProductChannelListing
 from ....product.tests.utils import create_image, create_pdf_file_with_image_ext
+from ....tests.utils import dummy_editorjs
 from ...tests.utils import get_graphql_content, get_multipart_request_body
 
 QUERY_CATEGORY = """
-    query ($id: ID, $slug: String){
+    query ($id: ID, $slug: String, $channel: String){
         category(
             id: $id,
             slug: $slug,
@@ -33,7 +33,7 @@ QUERY_CATEGORY = """
                     }
                 }
             }
-            products(first: 10) {
+            products(first: 10, channel: $channel) {
                 edges {
                     node {
                         id
@@ -45,11 +45,12 @@ QUERY_CATEGORY = """
     """
 
 
-def test_category_query_by_id(
-    user_api_client, product,
-):
+def test_category_query_by_id(user_api_client, product, channel_USD):
     category = Category.objects.first()
-    variables = {"id": graphene.Node.to_global_id("Category", category.pk)}
+    variables = {
+        "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
+    }
 
     response = user_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
     content = get_graphql_content(response)
@@ -60,11 +61,65 @@ def test_category_query_by_id(
     assert len(category_data["children"]["edges"]) == category.get_children().count()
 
 
-def test_category_query_by_slug(
-    user_api_client, product,
-):
+def test_category_query_description(user_api_client, product, channel_USD):
     category = Category.objects.first()
-    variables = {"slug": category.slug}
+    description = dummy_editorjs("Test description.", json_format=True)
+    category.description = dummy_editorjs("Test description.")
+    category.save()
+    variables = {
+        "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
+    }
+    query = """
+    query ($id: ID, $slug: String){
+        category(
+            id: $id,
+            slug: $slug,
+        ) {
+            id
+            name
+            description
+            descriptionJson
+        }
+    }
+    """
+    response = user_api_client.post_graphql(query, variables=variables)
+    content = get_graphql_content(response)
+    category_data = content["data"]["category"]
+    assert category_data["description"] == description
+    assert category_data["descriptionJson"] == description
+
+
+def test_category_query_without_description(user_api_client, product, channel_USD):
+    category = Category.objects.first()
+    category.save()
+    variables = {
+        "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
+    }
+    query = """
+    query ($id: ID, $slug: String){
+        category(
+            id: $id,
+            slug: $slug,
+        ) {
+            id
+            name
+            description
+            descriptionJson
+        }
+    }
+    """
+    response = user_api_client.post_graphql(query, variables=variables)
+    content = get_graphql_content(response)
+    category_data = content["data"]["category"]
+    assert category_data["description"] is None
+    assert category_data["descriptionJson"] == "{}"
+
+
+def test_category_query_by_slug(user_api_client, product, channel_USD):
+    category = Category.objects.first()
+    variables = {"slug": category.slug, "channel": channel_USD.slug}
     response = user_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
     content = get_graphql_content(response)
     category_data = content["data"]["category"]
@@ -75,12 +130,13 @@ def test_category_query_by_slug(
 
 
 def test_category_query_error_when_id_and_slug_provided(
-    user_api_client, product, graphql_log_handler,
+    user_api_client, product, graphql_log_handler, channel_USD
 ):
     category = Category.objects.first()
     variables = {
         "id": graphene.Node.to_global_id("Category", category.pk),
         "slug": category.slug,
+        "channel": channel_USD.slug,
     }
     response = user_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
     assert graphql_log_handler.messages == [
@@ -91,7 +147,7 @@ def test_category_query_error_when_id_and_slug_provided(
 
 
 def test_category_query_error_when_no_param(
-    user_api_client, product, graphql_log_handler,
+    user_api_client, product, graphql_log_handler
 ):
     variables = {}
     response = user_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
@@ -103,18 +159,18 @@ def test_category_query_error_when_no_param(
 
 
 def test_query_category_product_only_visible_in_listings_as_customer(
-    user_api_client, product_list
+    user_api_client, product_list, channel_USD
 ):
     # given
     category = Category.objects.first()
 
-    product_list[0].visible_in_listings = False
-    product_list[0].save(update_fields=["visible_in_listings"])
+    product_list[0].channel_listings.all().update(visible_in_listings=False)
 
     product_count = Product.objects.count()
 
     variables = {
         "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
     }
 
     # when
@@ -125,44 +181,19 @@ def test_query_category_product_only_visible_in_listings_as_customer(
     assert len(content["data"]["category"]["products"]["edges"]) == product_count - 1
 
 
-def test_query_category_product_only_visible_in_listings_as_staff_without_perm(
-    staff_api_client, product_list
+def test_query_category_product_visible_in_listings_as_staff_without_manage_products(
+    staff_api_client, product_list, channel_USD
 ):
     # given
     category = Category.objects.first()
 
-    product_list[0].visible_in_listings = False
-    product_list[0].save(update_fields=["visible_in_listings"])
+    product_list[0].channel_listings.all().update(visible_in_listings=False)
 
     product_count = Product.objects.count()
 
     variables = {
         "id": graphene.Node.to_global_id("Category", category.pk),
-    }
-
-    # when
-    response = staff_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
-
-    # then
-    content = get_graphql_content(response, ignore_errors=True)
-    assert len(content["data"]["category"]["products"]["edges"]) == product_count - 1
-
-
-def test_query_category_product_only_visible_in_listings_as_staff_with_perm(
-    staff_api_client, product_list, permission_manage_products
-):
-    # given
-    staff_api_client.user.user_permissions.add(permission_manage_products)
-
-    category = Category.objects.first()
-
-    product_list[0].visible_in_listings = False
-    product_list[0].save(update_fields=["visible_in_listings"])
-
-    product_count = Product.objects.count()
-
-    variables = {
-        "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
     }
 
     # when
@@ -173,19 +204,41 @@ def test_query_category_product_only_visible_in_listings_as_staff_with_perm(
     assert len(content["data"]["category"]["products"]["edges"]) == product_count
 
 
-def test_query_category_product_only_visible_in_listings_as_app_without_perm(
-    app_api_client, product_list
+def test_query_category_product_only_visible_in_listings_as_staff_with_perm(
+    staff_api_client, product_list, permission_manage_products
+):
+    # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    category = Category.objects.first()
+
+    product_list[0].channel_listings.all().update(visible_in_listings=False)
+
+    product_count = Product.objects.count()
+
+    variables = {"id": graphene.Node.to_global_id("Category", category.pk)}
+
+    # when
+    response = staff_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
+
+    # then
+    content = get_graphql_content(response, ignore_errors=True)
+    assert len(content["data"]["category"]["products"]["edges"]) == product_count
+
+
+def test_query_category_product_only_visible_in_listings_as_app_without_manage_products(
+    app_api_client, product_list, channel_USD
 ):
     # given
     category = Category.objects.first()
 
-    product_list[0].visible_in_listings = False
-    product_list[0].save(update_fields=["visible_in_listings"])
+    product_list[0].channel_listings.all().update(visible_in_listings=False)
 
     product_count = Product.objects.count()
 
     variables = {
         "id": graphene.Node.to_global_id("Category", category.pk),
+        "channel": channel_USD.slug,
     }
 
     # when
@@ -193,7 +246,7 @@ def test_query_category_product_only_visible_in_listings_as_app_without_perm(
 
     # then
     content = get_graphql_content(response, ignore_errors=True)
-    assert len(content["data"]["category"]["products"]["edges"]) == product_count - 1
+    assert len(content["data"]["category"]["products"]["edges"]) == product_count
 
 
 def test_query_category_product_only_visible_in_listings_as_app_with_perm(
@@ -204,14 +257,11 @@ def test_query_category_product_only_visible_in_listings_as_app_with_perm(
 
     category = Category.objects.first()
 
-    product_list[0].visible_in_listings = False
-    product_list[0].save(update_fields=["visible_in_listings"])
+    product_list[0].channel_listings.all().update(visible_in_listings=False)
 
     product_count = Product.objects.count()
 
-    variables = {
-        "id": graphene.Node.to_global_id("Category", category.pk),
-    }
+    variables = {"id": graphene.Node.to_global_id("Category", category.pk)}
 
     # when
     response = app_api_client.post_graphql(QUERY_CATEGORY, variables=variables)
@@ -223,15 +273,14 @@ def test_query_category_product_only_visible_in_listings_as_app_with_perm(
 
 CATEGORY_CREATE_MUTATION = """
         mutation(
-                $name: String, $slug: String, $description: String,
-                $descriptionJson: JSONString, $backgroundImage: Upload,
+                $name: String, $slug: String,
+                $description: JSONString, $backgroundImage: Upload,
                 $backgroundImageAlt: String, $parentId: ID) {
             categoryCreate(
                 input: {
                     name: $name
                     slug: $slug
                     description: $description
-                    descriptionJson: $descriptionJson
                     backgroundImage: $backgroundImage
                     backgroundImageAlt: $backgroundImageAlt
                 },
@@ -242,7 +291,6 @@ CATEGORY_CREATE_MUTATION = """
                     name
                     slug
                     description
-                    descriptionJson
                     parent {
                         name
                         id
@@ -277,8 +325,7 @@ def test_category_create_mutation(
 
     category_name = "Test category"
     category_slug = slugify(category_name)
-    category_description = "Test description"
-    category_description_json = json.dumps({"content": "description"})
+    category_description = dummy_editorjs("description", True)
     image_file, image_name = create_image()
     image_alt = "Alt text for an image."
 
@@ -286,7 +333,6 @@ def test_category_create_mutation(
     variables = {
         "name": category_name,
         "description": category_description,
-        "descriptionJson": category_description_json,
         "backgroundImage": image_name,
         "backgroundImageAlt": image_alt,
         "slug": category_slug,
@@ -300,7 +346,6 @@ def test_category_create_mutation(
     assert data["productErrors"] == []
     assert data["category"]["name"] == category_name
     assert data["category"]["description"] == category_description
-    assert data["category"]["descriptionJson"] == category_description_json
     assert not data["category"]["parent"]
     category = Category.objects.get(name=category_name)
     assert category.background_image.file
@@ -366,6 +411,7 @@ def test_category_create_mutation_without_background_image(
     monkeypatch, staff_api_client, permission_manage_products
 ):
     query = CATEGORY_CREATE_MUTATION
+    description = dummy_editorjs("description", True)
 
     mock_create_thumbnails = Mock(return_value=None)
     monkeypatch.setattr(
@@ -380,7 +426,7 @@ def test_category_create_mutation_without_background_image(
     category_name = "Test category"
     variables = {
         "name": category_name,
-        "description": "Test description",
+        "description": description,
         "slug": slugify(category_name),
     }
     response = staff_api_client.post_graphql(
@@ -395,7 +441,7 @@ def test_category_create_mutation_without_background_image(
 MUTATION_CATEGORY_UPDATE_MUTATION = """
     mutation($id: ID!, $name: String, $slug: String,
             $backgroundImage: Upload, $backgroundImageAlt: String,
-            $description: String) {
+            $description: JSONString) {
 
         categoryUpdate(
             id: $id
@@ -445,7 +491,8 @@ def test_category_update_mutation(
 
     category_name = "Updated name"
     category_slug = slugify(category_name)
-    category_description = "Updated description"
+    category_description = dummy_editorjs("description", True)
+
     image_file, image_name = create_image()
     image_alt = "Alt text for an image."
 
@@ -508,7 +555,7 @@ def test_category_update_mutation_without_background_image(
     monkeypatch, staff_api_client, category, permission_manage_products
 ):
     query = """
-        mutation($id: ID!, $name: String, $slug: String, $description: String) {
+        mutation($id: ID!, $name: String, $slug: String, $description: JSONString) {
             categoryUpdate(
                 id: $id
                 input: {
@@ -540,7 +587,7 @@ def test_category_update_mutation_without_background_image(
             "Category", category.children.create(name="child").pk
         ),
         "name": category_name,
-        "description": "Updated description",
+        "description": dummy_editorjs("description", True),
         "slug": slugify(category_name),
     }
     response = staff_api_client.post_graphql(
@@ -735,9 +782,9 @@ def test_category_delete_mutation(
         category.refresh_from_db()
 
 
-@patch("saleor.product.utils.update_products_minimal_variant_prices_task")
+@patch("saleor.product.utils.update_products_discounted_prices_task")
 def test_category_delete_mutation_for_categories_tree(
-    mock_update_products_minimal_variant_prices_task,
+    mock_update_products_discounted_prices_task,
     staff_api_client,
     categories_tree_with_published_products,
     permission_manage_products,
@@ -758,22 +805,25 @@ def test_category_delete_mutation_for_categories_tree(
     with pytest.raises(parent._meta.model.DoesNotExist):
         parent.refresh_from_db()
 
-    mock_update_products_minimal_variant_prices_task.delay.assert_called_once()
+    mock_update_products_discounted_prices_task.delay.assert_called_once()
     (
         _call_args,
         call_kwargs,
-    ) = mock_update_products_minimal_variant_prices_task.delay.call_args
+    ) = mock_update_products_discounted_prices_task.delay.call_args
     assert set(call_kwargs["product_ids"]) == set(p.pk for p in product_list)
 
-    for product in product_list:
-        product.refresh_from_db()
-        assert not product.is_published
-        assert not product.publication_date
+    product_channel_listings = ProductChannelListing.objects.filter(
+        product__in=product_list
+    )
+    for product_channel_listing in product_channel_listings:
+        assert product_channel_listing.is_published is False
+        assert not product_channel_listing.publication_date
+    assert product_channel_listings.count() == 4
 
 
-@patch("saleor.product.utils.update_products_minimal_variant_prices_task")
+@patch("saleor.product.utils.update_products_discounted_prices_task")
 def test_category_delete_mutation_for_children_from_categories_tree(
-    mock_update_products_minimal_variant_prices_task,
+    mock_update_products_discounted_prices_task,
     staff_api_client,
     categories_tree_with_published_products,
     permission_manage_products,
@@ -793,19 +843,27 @@ def test_category_delete_mutation_for_children_from_categories_tree(
     with pytest.raises(child._meta.model.DoesNotExist):
         child.refresh_from_db()
 
-    mock_update_products_minimal_variant_prices_task.delay.assert_called_once_with(
+    mock_update_products_discounted_prices_task.delay.assert_called_once_with(
         product_ids=[child_product.pk]
     )
 
     parent_product.refresh_from_db()
     assert parent_product.category
-    assert parent_product.is_published
-    assert parent_product.publication_date
+    product_channel_listings = ProductChannelListing.objects.filter(
+        product=parent_product
+    )
+    for product_channel_listing in product_channel_listings:
+        assert product_channel_listing.is_published is True
+        assert product_channel_listing.publication_date
 
     child_product.refresh_from_db()
     assert not child_product.category
-    assert not child_product.is_published
-    assert not child_product.publication_date
+    product_channel_listings = ProductChannelListing.objects.filter(
+        product=child_product
+    )
+    for product_channel_listing in product_channel_listings:
+        assert product_channel_listing.is_published is False
+        assert not product_channel_listing.publication_date
 
 
 LEVELED_CATEGORIES_QUERY = """

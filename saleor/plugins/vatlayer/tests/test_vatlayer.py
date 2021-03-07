@@ -4,13 +4,20 @@ from urllib.parse import urlparse
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.test import override_settings
 from django_countries.fields import Country
 from prices import Money, MoneyRange, TaxedMoney, TaxedMoneyRange
 
 from ....checkout import calculations
+from ....checkout.fetch import (
+    CheckoutLineInfo,
+    fetch_checkout_info,
+    fetch_checkout_lines,
+)
 from ....checkout.utils import add_variant_to_checkout
 from ....core.prices import quantize_price
 from ....core.taxes import zero_taxed_money
+from ....product.models import Product
 from ...manager import get_plugins_manager
 from ...models import PluginConfiguration
 from ...vatlayer import (
@@ -181,7 +188,9 @@ def test_apply_tax_to_price_no_taxes_raise_typeerror_for_invalid_type():
         assert apply_tax_to_price(None, "standard", 100)
 
 
-def test_vatlayer_plugin_caches_taxes(vatlayer, monkeypatch, product, address):
+def test_vatlayer_plugin_caches_taxes(
+    vatlayer, monkeypatch, product, address, channel_USD
+):
     mocked_taxes = Mock(wraps=get_taxes_for_country)
     monkeypatch.setattr(
         "saleor.plugins.vatlayer.plugin.get_taxes_for_country", mocked_taxes
@@ -189,7 +198,9 @@ def test_vatlayer_plugin_caches_taxes(vatlayer, monkeypatch, product, address):
 
     manager = get_plugins_manager()
     plugin = manager.get_plugin(VatlayerPlugin.PLUGIN_ID)
-    price = product.variants.first().get_price()
+    variant = product.variants.first()
+    channel_listing = variant.channel_listings.get(channel=channel_USD)
+    price = variant.get_price(product, [], channel_USD, channel_listing, None)
     address.country = Country("de")
     plugin.apply_taxes_to_product(
         product, price, address.country, TaxedMoney(price, price)
@@ -207,6 +218,7 @@ def test_vatlayer_plugin_caches_taxes(vatlayer, monkeypatch, product, address):
         (False, "29.52", "37.00", "3.0", True),
     ],
 )
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_calculate_checkout_total(
     site_settings,
     vatlayer,
@@ -220,9 +232,7 @@ def test_calculate_checkout_total(
     voucher_amount,
     taxes_in_prices,
 ):
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
     checkout_with_item.shipping_address = address
     checkout_with_item.save()
     voucher_amount = Money(voucher_amount, "USD")
@@ -238,9 +248,9 @@ def test_calculate_checkout_total(
     site_settings.save()
 
     discounts = [discount_info] if with_discount else None
-    total = manager.calculate_checkout_total(
-        checkout_with_item, list(checkout_with_item), discounts
-    )
+    lines = fetch_checkout_lines(checkout_with_item)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, discounts)
+    total = manager.calculate_checkout_total(checkout_info, lines, address, discounts)
     total = quantize_price(total, total.currency)
     assert total == TaxedMoney(
         net=Money(expected_net, "USD"), gross=Money(expected_gross, "USD")
@@ -256,6 +266,7 @@ def test_calculate_checkout_total(
         (True, "20.35", "25.00", True),
     ],
 )
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_calculate_checkout_subtotal(
     site_settings,
     vatlayer,
@@ -277,9 +288,7 @@ def test_calculate_checkout_subtotal(
     checkout_with_item.shipping_method = shipping_zone.shipping_methods.get()
     checkout_with_item.save()
 
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
 
     product = variant.product
     manager.assign_tax_code_to_object_meta(product, "standard")
@@ -287,8 +296,10 @@ def test_calculate_checkout_subtotal(
 
     discounts = [discount_info] if with_discount else None
     add_variant_to_checkout(checkout_with_item, variant, 2)
+    lines = fetch_checkout_lines(checkout_with_item)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, discounts)
     total = manager.calculate_checkout_subtotal(
-        checkout_with_item, list(checkout_with_item), discounts
+        checkout_info, lines, address, discounts
     )
     total = quantize_price(total, total.currency)
     assert total == TaxedMoney(
@@ -296,10 +307,9 @@ def test_calculate_checkout_subtotal(
     )
 
 
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_calculate_order_shipping(vatlayer, order_line, shipping_zone, site_settings):
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
     order = order_line.order
     method = shipping_zone.shipping_methods.get()
     order.shipping_address = order.billing_address.get_copy()
@@ -311,12 +321,11 @@ def test_calculate_order_shipping(vatlayer, order_line, shipping_zone, site_sett
     assert price == TaxedMoney(net=Money("8.13", "USD"), gross=Money("10.00", "USD"))
 
 
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_calculate_order_shipping_for_order_without_shipping(
     vatlayer, order_line, shipping_zone, site_settings
 ):
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
     order = order_line.order
     order.shipping_method = None
     order.save()
@@ -324,10 +333,9 @@ def test_calculate_order_shipping_for_order_without_shipping(
     assert price == zero_taxed_money(order.currency)
 
 
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_calculate_order_line_unit(vatlayer, order_line, shipping_zone, site_settings):
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
     order_line.unit_price = TaxedMoney(
         net=Money("10.00", "USD"), gross=Money("10.00", "USD")
     )
@@ -340,23 +348,114 @@ def test_calculate_order_line_unit(vatlayer, order_line, shipping_zone, site_set
     order.shipping_method = method
     order.save()
 
-    product = order_line.variant.product
+    variant = order_line.variant
+    product = variant.product
     manager.assign_tax_code_to_object_meta(product, "standard")
     product.save()
 
-    line_price = manager.calculate_order_line_unit(order_line)
+    line_price = manager.calculate_order_line_unit(order, order_line, variant, product)
     line_price = quantize_price(line_price, line_price.currency)
     assert line_price == TaxedMoney(
         net=Money("8.13", "USD"), gross=Money("10.00", "USD")
     )
 
 
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_calculate_checkout_line_total(
+    vatlayer, checkout_with_item, shipping_zone, address, site_settings
+):
+    manager = get_plugins_manager()
+
+    line = checkout_with_item.lines.first()
+    assert line.quantity > 1
+
+    channel = checkout_with_item.channel
+    channel_listing = line.variant.channel_listings.get(channel=channel)
+
+    method = shipping_zone.shipping_methods.get()
+    checkout_with_item.shipping_address = address
+    checkout_with_item.shipping_method_name = method.name
+    checkout_with_item.shipping_method = method
+    checkout_with_item.save()
+
+    variant = line.variant
+    product = variant.product
+    manager.assign_tax_code_to_object_meta(variant.product, "standard")
+    product.save()
+
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=line.variant,
+        channel_listing=channel_listing,
+        product=line.variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    line_price = manager.calculate_checkout_line_total(
+        checkout_info,
+        checkout_line_info,
+        address,
+        [],
+    )
+
+    assert line_price == TaxedMoney(
+        net=Money("8.13", "USD") * line.quantity,
+        gross=Money("10.00", "USD") * line.quantity,
+    )
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_calculate_checkout_line_unit_price(
+    vatlayer, checkout_with_item, shipping_zone, address, site_settings
+):
+    manager = get_plugins_manager()
+    total_price = TaxedMoney(net=Money("10.00", "USD"), gross=Money("10.00", "USD"))
+
+    line = checkout_with_item.lines.first()
+
+    channel = checkout_with_item.channel
+    channel_listing = line.variant.channel_listings.get(channel=channel)
+
+    method = shipping_zone.shipping_methods.get()
+    checkout_with_item.shipping_address = address
+    checkout_with_item.shipping_method_name = method.name
+    checkout_with_item.shipping_method = method
+    checkout_with_item.save()
+
+    variant = line.variant
+    product = variant.product
+    manager.assign_tax_code_to_object_meta(variant.product, "standard")
+    product.save()
+
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=line.variant,
+        channel_listing=channel_listing,
+        product=line.variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    line_price = manager.calculate_checkout_line_unit_price(
+        total_price,
+        line.quantity,
+        checkout_info,
+        checkout_line_info,
+        address,
+        [],
+    )
+
+    assert line_price == TaxedMoney(
+        net=Money("8.13", "USD"), gross=Money("10.00", "USD")
+    )
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
 def test_get_tax_rate_percentage_value(
     vatlayer, order_line, shipping_zone, site_settings, product
 ):
-    manager = get_plugins_manager(
-        plugins=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    )
+    manager = get_plugins_manager()
     country = Country("PL")
     tax_rate = manager.get_tax_rate_percentage_value(product, country)
     assert tax_rate == Decimal("23")
@@ -376,7 +475,8 @@ def test_save_plugin_configuration_cannot_be_enabled_without_config(settings):
     manager = get_plugins_manager()
     with pytest.raises(ValidationError):
         manager.save_plugin_configuration(
-            VatlayerPlugin.PLUGIN_ID, {"active": True},
+            VatlayerPlugin.PLUGIN_ID,
+            {"active": True},
         )
 
 
@@ -393,7 +493,8 @@ def test_get_tax_rate_type_choices(vatlayer, settings, monkeypatch):
         "admission to entertainment events",
     ]
     monkeypatch.setattr(
-        "saleor.plugins.vatlayer.plugin.get_tax_rate_types", lambda: expected_choices,
+        "saleor.plugins.vatlayer.plugin.get_tax_rate_types",
+        lambda: expected_choices,
     )
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
     manager = get_plugins_manager()
@@ -407,22 +508,9 @@ def test_get_tax_rate_type_choices(vatlayer, settings, monkeypatch):
         assert choice.code in expected_choices
 
 
-def test_apply_taxes_to_shipping_price_range(vatlayer, settings):
-    settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
-    money_range = MoneyRange(Money(100, "USD"), Money(200, "USD"))
-    country = Country("PL")
-    manager = get_plugins_manager()
-
-    expected_start = TaxedMoney(net=Money("81.30", "USD"), gross=Money("100", "USD"))
-    expected_stop = TaxedMoney(net=Money("162.60", "USD"), gross=Money("200", "USD"))
-
-    price_range = manager.apply_taxes_to_shipping_price_range(money_range, country)
-
-    assert price_range.start == expected_start
-    assert price_range.stop == expected_stop
-
-
-def test_apply_taxes_to_product(vatlayer, settings, variant, discount_info):
+def test_apply_taxes_to_product(
+    vatlayer, settings, variant, discount_info, channel_USD
+):
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
     country = Country("PL")
     manager = get_plugins_manager()
@@ -430,25 +518,36 @@ def test_apply_taxes_to_product(vatlayer, settings, variant, discount_info):
         "vatlayer.code": "standard",
         "vatlayer.description": "standard",
     }
+    variant_channel_listing = variant.channel_listings.get(channel=channel_USD)
     price = manager.apply_taxes_to_product(
-        variant.product, variant.get_price([discount_info]), country
+        variant.product,
+        variant.get_price(
+            variant.product, [], channel_USD, variant_channel_listing, [discount_info]
+        ),
+        country,
     )
     assert price == TaxedMoney(net=Money("4.07", "USD"), gross=Money("5.00", "USD"))
 
 
 def test_apply_taxes_to_product_uses_taxes_from_product_type(
-    vatlayer, settings, variant, discount_info
+    vatlayer, settings, variant, discount_info, channel_USD
 ):
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
     country = Country("PL")
     manager = get_plugins_manager()
-    variant.product.metadata = {}
-    variant.product.product_type.metadata = {
+    product = variant.product
+    product.metadata = {}
+    product.product_type.metadata = {
         "vatlayer.code": "standard",
         "vatlayer.description": "standard",
     }
+    variant_channel_listing = variant.channel_listings.get(channel=channel_USD)
     price = manager.apply_taxes_to_product(
-        variant.product, variant.get_price([discount_info]), country
+        product,
+        variant.get_price(
+            product, [], channel_USD, variant_channel_listing, [discount_info]
+        ),
+        country,
     )
     assert price == TaxedMoney(net=Money("4.07", "USD"), gross=Money("5.00", "USD"))
 
@@ -457,8 +556,14 @@ def test_calculations_checkout_total_with_vatlayer(
     vatlayer, settings, checkout_with_item
 ):
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
+    manager = get_plugins_manager()
+    lines = fetch_checkout_lines(checkout_with_item)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, [])
     checkout_subtotal = calculations.checkout_total(
-        checkout=checkout_with_item, lines=list(checkout_with_item)
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout_with_item.shipping_address,
     )
     assert checkout_subtotal == TaxedMoney(
         net=Money("30", "USD"), gross=Money("30", "USD")
@@ -469,8 +574,14 @@ def test_calculations_checkout_subtotal_with_vatlayer(
     vatlayer, settings, checkout_with_item
 ):
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
+    manager = get_plugins_manager()
+    lines = fetch_checkout_lines(checkout_with_item)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, [])
     checkout_subtotal = calculations.checkout_subtotal(
-        checkout=checkout_with_item, lines=list(checkout_with_item)
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout_with_item.shipping_address,
     )
     assert checkout_subtotal == TaxedMoney(
         net=Money("30", "USD"), gross=Money("30", "USD")
@@ -481,8 +592,14 @@ def test_calculations_checkout_shipping_price_with_vatlayer(
     vatlayer, settings, checkout_with_item
 ):
     settings.PLUGINS = ["saleor.plugins.vatlayer.plugin.VatlayerPlugin"]
+    manager = get_plugins_manager()
+    lines = fetch_checkout_lines(checkout_with_item)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, [])
     checkout_shipping_price = calculations.checkout_shipping_price(
-        checkout=checkout_with_item, lines=list(checkout_with_item)
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout_with_item.shipping_address,
     )
     assert checkout_shipping_price == TaxedMoney(
         net=Money("0", "USD"), gross=Money("0", "USD")
@@ -500,3 +617,346 @@ def test_skip_diabled_plugin(settings):
         )
         is True
     )
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_checkout_line_tax_rate(
+    site_settings,
+    vatlayer,
+    checkout_with_item,
+    address,
+    shipping_zone,
+):
+    manager = get_plugins_manager()
+    checkout_with_item.shipping_address = address
+    checkout_with_item.save()
+    checkout_with_item.shipping_method = shipping_zone.shipping_methods.get()
+    checkout_with_item.save()
+
+    line = checkout_with_item.lines.first()
+    product = line.variant.product
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    variant = line.variant
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=variant,
+        channel_listing=variant.channel_listings.first(),
+        product=variant.product,
+        collections=[],
+    )
+
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+    tax_rate = manager.get_checkout_line_tax_rate(
+        checkout_info,
+        checkout_line_info,
+        checkout_with_item.shipping_address,
+        [],
+        unit_price,
+    )
+    assert tax_rate == Decimal("0.230")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_checkout_line_tax_rate_order_not_valid(
+    site_settings,
+    vatlayer,
+    checkout_with_item,
+):
+    manager = get_plugins_manager()
+
+    line = checkout_with_item.lines.first()
+    product = line.variant.product
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    variant = line.variant
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=variant,
+        channel_listing=variant.channel_listings.first(),
+        product=variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    tax_rate = manager.get_checkout_line_tax_rate(
+        checkout_info,
+        checkout_line_info,
+        checkout_with_item.shipping_address,
+        [],
+        unit_price,
+    )
+    assert tax_rate == Decimal("0.25")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_order_line_tax_rate(
+    site_settings,
+    vatlayer,
+    order_line,
+    address,
+    shipping_zone,
+):
+    manager = get_plugins_manager()
+    order = order_line.order
+    product = Product.objects.get(name=order_line.product_name)
+    product.save()
+
+    method = shipping_zone.shipping_methods.get()
+    order.shipping_address = address
+    order.shipping_method_name = method.name
+    order.shipping_method = method
+    order.save()
+
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    tax_rate = manager.get_order_line_tax_rate(order, product, address, unit_price)
+    assert tax_rate == Decimal("0.230")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_order_line_tax_rate_order_no_address_given(
+    site_settings,
+    order_line,
+    vatlayer,
+):
+    manager = get_plugins_manager()
+    order = order_line.order
+    product = Product.objects.get(name=order_line.product_name)
+
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    tax_rate = manager.get_order_line_tax_rate(order, product, None, unit_price)
+    assert tax_rate == Decimal("0.25")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_checkout_shipping_tax_rate(
+    site_settings,
+    vatlayer,
+    checkout_with_item,
+    address,
+    shipping_zone,
+):
+    manager = get_plugins_manager()
+    checkout_with_item.shipping_address = address
+    checkout_with_item.save()
+    checkout_with_item.shipping_method = shipping_zone.shipping_methods.get()
+    checkout_with_item.save()
+
+    line = checkout_with_item.lines.first()
+    product = line.variant.product
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    variant = line.variant
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=variant,
+        channel_listing=variant.channel_listings.first(),
+        product=variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    tax_rate = manager.get_checkout_shipping_tax_rate(
+        checkout_info,
+        [checkout_line_info],
+        checkout_with_item.shipping_address,
+        [],
+        unit_price,
+    )
+    assert tax_rate == Decimal("0.230")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_checkout_shipping_tax_rate_no_address(
+    site_settings,
+    vatlayer,
+    checkout_with_item,
+):
+    manager = get_plugins_manager()
+
+    line = checkout_with_item.lines.first()
+    product = line.variant.product
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    variant = line.variant
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=variant,
+        channel_listing=variant.channel_listings.first(),
+        product=variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    tax_rate = manager.get_checkout_shipping_tax_rate(
+        checkout_info,
+        checkout_line_info,
+        checkout_with_item.shipping_address,
+        [],
+        unit_price,
+    )
+    assert tax_rate == Decimal("0.25")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_checkout_shipping_tax_rate_skip_plugin(
+    site_settings, vatlayer, checkout_with_item, monkeypatch, address, shipping_zone
+):
+    manager = get_plugins_manager()
+    monkeypatch.setattr(
+        "saleor.plugins.vatlayer.plugin.VatlayerPlugin._skip_plugin",
+        lambda *_: True,
+    )
+
+    checkout_with_item.shipping_address = address
+    checkout_with_item.save()
+    checkout_with_item.shipping_method = shipping_zone.shipping_methods.get()
+    checkout_with_item.save()
+
+    line = checkout_with_item.lines.first()
+    product = line.variant.product
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    variant = line.variant
+    checkout_line_info = CheckoutLineInfo(
+        line=line,
+        variant=variant,
+        channel_listing=variant.channel_listings.first(),
+        product=variant.product,
+        collections=[],
+    )
+    checkout_info = fetch_checkout_info(checkout_with_item, [checkout_line_info], [])
+
+    tax_rate = manager.get_checkout_shipping_tax_rate(
+        checkout_info,
+        checkout_line_info,
+        checkout_with_item.shipping_address,
+        [],
+        unit_price,
+    )
+    assert tax_rate == Decimal("0.25")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_order_shipping_tax_rate(
+    site_settings,
+    vatlayer,
+    order_line,
+    address,
+    shipping_zone,
+):
+    manager = get_plugins_manager()
+    order = order_line.order
+    product = Product.objects.get(name=order_line.product_name)
+    product.save()
+
+    method = shipping_zone.shipping_methods.get()
+    order.shipping_address = address
+    order.shipping_method_name = method.name
+    order.shipping_method = method
+    order.save()
+
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    shipping_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    tax_rate = manager.get_order_shipping_tax_rate(order, shipping_price)
+    assert tax_rate == Decimal("0.230")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_order_shipping_tax_rate_no_address_given(
+    site_settings,
+    order_line,
+    vatlayer,
+):
+    manager = get_plugins_manager()
+    order = order_line.order
+    product = Product.objects.get(name=order_line.product_name)
+
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    order.shipping_address = None
+    order.billing_address = None
+    order.save(update_fields=["shipping_address", "billing_address"])
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    shipping_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    tax_rate = manager.get_order_shipping_tax_rate(order, shipping_price)
+    assert tax_rate == Decimal("0.25")
+
+
+@override_settings(PLUGINS=["saleor.plugins.vatlayer.plugin.VatlayerPlugin"])
+def test_get_order_shipping_tax_rate_skip_plugin(
+    site_settings, order_line, vatlayer, monkeypatch
+):
+    manager = get_plugins_manager()
+    monkeypatch.setattr(
+        "saleor.plugins.vatlayer.plugin.VatlayerPlugin._skip_plugin",
+        lambda *_: True,
+    )
+    order = order_line.order
+    product = Product.objects.get(name=order_line.product_name)
+
+    manager.assign_tax_code_to_object_meta(product, "standard")
+    product.save()
+
+    site_settings.include_taxes_in_prices = True
+    site_settings.save()
+
+    shipping_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
+
+    tax_rate = manager.get_order_shipping_tax_rate(order, shipping_price)
+    assert tax_rate == Decimal("0.25")

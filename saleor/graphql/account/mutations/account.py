@@ -5,7 +5,9 @@ from django.contrib.auth import password_validation
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
 
-from ....account import emails, events as account_events, models, utils
+from ....account import emails
+from ....account import events as account_events
+from ....account import models, utils
 from ....account.error_codes import AccountErrorCode
 from ....checkout import AddressType
 from ....core.jwt import create_token, jwt_decode
@@ -15,8 +17,6 @@ from ...account.enums import AddressTypeEnum
 from ...account.types import Address, AddressInput, User
 from ...core.mutations import BaseMutation, ModelDeleteMutation, ModelMutation
 from ...core.types.common import AccountError
-from ...meta.deprecated.mutations import UpdateMetaBaseMutation
-from ...meta.deprecated.types import MetaInput
 from ..i18n import I18nMixin
 from .base import (
     INVALID_TOKEN,
@@ -274,6 +274,7 @@ class AccountAddressCreate(ModelMutation, I18nMixin):
         super().save(info, instance, cleaned_input)
         user = info.context.user
         instance.user_addresses.add(user)
+        info.context.plugins.customer_updated(user)
 
 
 class AccountAddressUpdate(BaseAddressUpdate):
@@ -331,30 +332,8 @@ class AccountSetDefaultAddress(BaseMutation):
             address_type = AddressType.SHIPPING
 
         utils.change_user_default_address(user, address, address_type)
+        info.context.plugins.customer_updated(user)
         return cls(user=user)
-
-
-class AccountUpdateMeta(UpdateMetaBaseMutation):
-    class Meta:
-        description = "Updates metadata of the logged-in user."
-        model = models.User
-        public = True
-        error_type_class = AccountError
-        error_type_field = "account_errors"
-
-    class Arguments:
-        input = MetaInput(
-            description="Fields required to update new or stored metadata item.",
-            required=True,
-        )
-
-    @classmethod
-    def check_permissions(cls, context):
-        return context.user.is_authenticated
-
-    @classmethod
-    def get_instance(cls, info, **data):
-        return info.context.user
 
 
 class RequestEmailChange(BaseMutation):
@@ -478,4 +457,5 @@ class ConfirmEmailChange(BaseMutation):
         account_events.customer_email_changed_event(
             user=user, parameters=event_parameters
         )
+        info.context.plugins.customer_updated(user)
         return ConfirmEmailChange(user=user)

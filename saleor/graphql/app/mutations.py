@@ -3,11 +3,11 @@ from typing import List
 import graphene
 import requests
 from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
 
 from ...app import models
 from ...app.error_codes import AppErrorCode
 from ...app.tasks import install_app_task
+from ...app.validators import AppURLValidator
 from ...core import JobStatus
 from ...core.permissions import (
     AppPermission,
@@ -146,7 +146,8 @@ class AppCreate(ModelMutation):
 
     class Arguments:
         input = AppInput(
-            required=True, description="Fields required to create a new app.",
+            required=True,
+            description="Fields required to create a new app.",
         )
 
     class Meta:
@@ -187,7 +188,8 @@ class AppUpdate(ModelMutation):
     class Arguments:
         id = graphene.ID(description="ID of an app to update.", required=True)
         input = AppInput(
-            required=True, description="Fields required to update an existing app.",
+            required=True,
+            description="Fields required to update an existing app.",
         )
 
     class Meta:
@@ -361,7 +363,8 @@ class AppInstallInput(graphene.InputObjectType):
 class AppInstall(ModelMutation):
     class Arguments:
         input = AppInstallInput(
-            required=True, description="Fields required to install a new app.",
+            required=True,
+            description="Fields required to install a new app.",
         )
 
     class Meta:
@@ -373,7 +376,7 @@ class AppInstall(ModelMutation):
 
     @classmethod
     def clean_manifest_url(self, url):
-        url_validator = URLValidator()
+        url_validator = AppURLValidator()
         try:
             url_validator(url)
         except (ValidationError, AttributeError):
@@ -440,7 +443,7 @@ class AppFetchManifest(BaseMutation):
 
     @classmethod
     def clean_manifest_url(cls, manifest_url):
-        url_validator = URLValidator()
+        url_validator = AppURLValidator()
         try:
             url_validator(manifest_url)
         except (ValidationError, AttributeError):
