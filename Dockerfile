@@ -31,6 +31,7 @@ RUN apt-get update \
   libxml2 \
   shared-mime-info \
   mime-support \
+  procps \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
