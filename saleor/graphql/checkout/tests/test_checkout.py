@@ -10,6 +10,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.test import override_settings
 from django_countries.fields import Country
+from measurement.measures import Weight
 from prices import Money, TaxedMoney
 
 from ....account.models import User
@@ -28,7 +29,7 @@ from ....payment import TransactionKind
 from ....payment.interface import GatewayResponse
 from ....plugins.manager import PluginsManager, get_plugins_manager
 from ....plugins.tests.sample_plugins import ActiveDummyPaymentGateway
-from ....product.models import ProductChannelListing
+from ....product.models import ProductChannelListing, ProductVariant
 from ....shipping import models as shipping_models
 from ....warehouse.models import Stock
 from ...tests.utils import assert_no_permission, get_graphql_content
@@ -110,6 +111,7 @@ MUTATION_CHECKOUT_CREATE = """
           id
           token
           email
+          quantity
           lines {
             quantity
           }
@@ -161,9 +163,10 @@ def test_checkout_create_with_default_channel(
     variant_id = graphene.Node.to_global_id("ProductVariant", variant.id)
     test_email = "test@example.com"
     shipping_address = graphql_address_data
+    quantity = 1
     variables = {
         "checkoutInput": {
-            "lines": [{"quantity": 1, "variantId": variant_id}],
+            "lines": [{"quantity": quantity, "variantId": variant_id}],
             "email": test_email,
             "shippingAddress": shipping_address,
         }
@@ -178,6 +181,7 @@ def test_checkout_create_with_default_channel(
     new_checkout = Checkout.objects.first()
 
     assert new_checkout.channel == channel_USD
+    assert new_checkout.quantity == quantity
 
     assert any(
         [str(warning.message) == DEPRECATION_WARNING_MESSAGE for warning in warns]
@@ -1207,6 +1211,67 @@ def test_checkout_available_shipping_methods(
     assert data["availableShippingMethods"][0]["name"] == shipping_method.name
 
 
+@pytest.mark.parametrize("minimum_order_weight_value", [0, 2, None])
+def test_checkout_available_shipping_methods_with_weight_based_shipping_method(
+    api_client,
+    checkout_with_item,
+    address,
+    shipping_method_weight_based,
+    minimum_order_weight_value,
+):
+    checkout_with_item.shipping_address = address
+    checkout_with_item.save()
+
+    shipping_method = shipping_method_weight_based
+    if minimum_order_weight_value is not None:
+        weight = Weight(kg=minimum_order_weight_value)
+        shipping_method.minimum_order_weight = weight
+        variant = checkout_with_item.lines.first().variant
+        variant.weight = weight
+        variant.save(update_fields=["weight"])
+    else:
+        shipping_method.minimum_order_weight = minimum_order_weight_value
+
+    shipping_method.save(update_fields=["minimum_order_weight"])
+
+    query = GET_CHECKOUT_AVAILABLE_SHIPPING_METHODS
+    variables = {"token": checkout_with_item.token}
+    response = api_client.post_graphql(query, variables)
+    content = get_graphql_content(response)
+    data = content["data"]["checkout"]
+
+    shipping_methods = [method["name"] for method in data["availableShippingMethods"]]
+    assert shipping_method.name in shipping_methods
+
+
+def test_checkout_available_shipping_methods_weight_method_with_higher_minimal_weigh(
+    api_client, checkout_with_item, address, shipping_method_weight_based
+):
+    checkout_with_item.shipping_address = address
+    checkout_with_item.save()
+
+    shipping_method = shipping_method_weight_based
+    weight_value = 5
+    shipping_method.minimum_order_weight = Weight(kg=weight_value)
+    shipping_method.save(update_fields=["minimum_order_weight"])
+
+    variants = []
+    for line in checkout_with_item.lines.all():
+        variant = line.variant
+        variant.weight = Weight(kg=1)
+        variants.append(variant)
+    ProductVariant.objects.bulk_update(variants, ["weight"])
+
+    query = GET_CHECKOUT_AVAILABLE_SHIPPING_METHODS
+    variables = {"token": checkout_with_item.token}
+    response = api_client.post_graphql(query, variables)
+    content = get_graphql_content(response)
+    data = content["data"]["checkout"]
+
+    shipping_methods = [method["name"] for method in data["availableShippingMethods"]]
+    assert shipping_method.name not in shipping_methods
+
+
 def test_checkout_available_shipping_methods_excluded_postal_codes(
     api_client, checkout_with_item, address, shipping_zone
 ):
@@ -1297,6 +1362,7 @@ MUTATION_CHECKOUT_LINES_ADD = """
         checkoutLinesAdd(checkoutId: $checkoutId, lines: $lines) {
             checkout {
                 token
+                quantity
                 lines {
                     quantity
                     variant {
@@ -1325,6 +1391,7 @@ def test_checkout_lines_add(
     checkout = checkout_with_item
     line = checkout.lines.first()
     assert line.quantity == 3
+    assert checkout.quantity == 3
     variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
     checkout_id = graphene.Node.to_global_id("Checkout", checkout.pk)
 
@@ -1341,6 +1408,7 @@ def test_checkout_lines_add(
     line = checkout.lines.latest("pk")
     assert line.variant == variant
     assert line.quantity == 1
+    assert checkout.quantity == 4
 
     lines = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [])
@@ -1537,6 +1605,7 @@ MUTATION_CHECKOUT_LINES_UPDATE = """
         checkoutLinesUpdate(checkoutId: $checkoutId, lines: $lines) {
             checkout {
                 token
+                quantity
                 lines {
                     quantity
                     variant {
@@ -1563,6 +1632,7 @@ def test_checkout_lines_update(
 ):
     checkout = checkout_with_item
     assert checkout.lines.count() == 1
+    assert checkout.quantity == 3
     line = checkout.lines.first()
     variant = line.variant
     assert line.quantity == 3
@@ -1584,6 +1654,7 @@ def test_checkout_lines_update(
     line = checkout.lines.first()
     assert line.variant == variant
     assert line.quantity == 1
+    assert checkout.quantity == 1
 
     lines = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [])
@@ -1735,6 +1806,7 @@ def test_checkout_line_delete(
     mocked_update_shipping_method, user_api_client, checkout_with_item
 ):
     checkout = checkout_with_item
+    assert checkout.quantity == 3
     assert checkout.lines.count() == 1
     line = checkout.lines.first()
     assert line.quantity == 3
@@ -1750,6 +1822,7 @@ def test_checkout_line_delete(
     assert not data["errors"]
     checkout.refresh_from_db()
     assert checkout.lines.count() == 0
+    assert checkout.quantity == 0
     lines = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [])
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
