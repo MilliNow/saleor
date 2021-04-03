@@ -44,6 +44,9 @@ if TYPE_CHECKING:
     from .base_plugin import BasePlugin
 
 
+NotifyEventTypeChoice = str
+
+
 class PluginsManager(PaymentInterface):
     """Base manager for handling plugins logic."""
 
@@ -324,12 +327,13 @@ class PluginsManager(PaymentInterface):
         self,
         order: "Order",
         product: "Product",
+        variant: "ProductVariant",
         address: Optional["Address"],
         unit_price: TaxedMoney,
     ) -> Decimal:
         default_value = base_calculations.base_tax_rate(unit_price)
         return self.__run_method_on_plugins(
-            "get_order_line_tax_rate", default_value, order, product, address
+            "get_order_line_tax_rate", default_value, order, product, variant, address
         ).quantize(Decimal(".0001"))
 
     def get_tax_rate_type_choices(self) -> List[TaxType]:
@@ -708,6 +712,10 @@ class PluginsManager(PaymentInterface):
         return self.__run_method_on_single_plugin(
             plugin, "webhook", default_value, request, path
         )
+
+    def notify(self, event: "NotifyEventTypeChoice", payload: dict):
+        default_value = None
+        return self.__run_method_on_plugins("notify", default_value, event, payload)
 
     def external_obtain_access_tokens(
         self, plugin_id: str, data: dict, request: WSGIRequest
