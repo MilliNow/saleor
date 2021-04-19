@@ -18,10 +18,25 @@ FRAGMENT_DISCOUNTS = """
   }
 """
 
+FRAGMENT_AVAILABLE_SHIPPING_METHODS = """
+    fragment AvailableShippingMethods on ShippingMethod {
+        id
+        price {
+            amount
+        }
+        minimumOrderPrice {
+            amount
+            currency
+        }
+        type
+    }
+"""
+
 FRAGMENT_ORDER_DETAILS = (
     FRAGMENT_ADDRESS
     + FRAGMENT_PRODUCT_VARIANT
     + FRAGMENT_DISCOUNTS
+    + FRAGMENT_AVAILABLE_SHIPPING_METHODS
     + """
       fragment OrderDetail on Order {
         userEmail
@@ -47,6 +62,9 @@ FRAGMENT_ORDER_DETAILS = (
             currency
             ...Price
           }
+        }
+        availableShippingMethods {
+          ...AvailableShippingMethods
         }
         subtotal {
           ...Price
@@ -169,6 +187,26 @@ MULTIPLE_ORDER_ADDRESS_DETAILS_QUERY = """
             id
           }
           userEmail
+          paymentStatus
+          paymentStatusDisplay
+          events {
+            id
+          }
+          totalCaptured {
+            amount
+          }
+          totalAuthorized {
+            amount
+          }
+          actions
+          subtotal {
+            net {
+              amount
+            }
+          }
+          fulfillments {
+            id
+          }
         }
       }
     }

@@ -72,7 +72,7 @@ class OrderQueryset(models.QuerySet):
         return qs.distinct()
 
     def ready_to_confirm(self):
-        """Return unconfirmed_orders."""
+        """Return unconfirmed orders."""
         return self.filter(status=OrderStatus.UNCONFIRMED)
 
 
@@ -259,18 +259,6 @@ class Order(ModelWithMetadata):
     def get_last_payment(self):
         return max(self.payments.all(), default=None, key=attrgetter("pk"))
 
-    def get_payment_status(self):
-        last_payment = self.get_last_payment()
-        if last_payment:
-            return last_payment.charge_status
-        return ChargeStatus.NOT_CHARGED
-
-    def get_payment_status_display(self):
-        last_payment = self.get_last_payment()
-        if last_payment:
-            return last_payment.get_charge_status_display()
-        return dict(ChargeStatus.CHOICES).get(ChargeStatus.NOT_CHARGED)
-
     def is_pre_authorized(self):
         return (
             self.payments.filter(
@@ -305,6 +293,9 @@ class Order(ModelWithMetadata):
 
     def is_draft(self):
         return self.status == OrderStatus.DRAFT
+
+    def is_unconfirmed(self):
+        return self.status == OrderStatus.UNCONFIRMED
 
     def is_open(self):
         statuses = {OrderStatus.UNFULFILLED, OrderStatus.PARTIALLY_FULFILLED}
