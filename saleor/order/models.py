@@ -21,7 +21,6 @@ from ..account.models import Address
 from ..channel.models import Channel
 from ..core.models import ModelWithMetadata
 from ..core.permissions import OrderPermissions
-from ..core.taxes import zero_taxed_money
 from ..core.units import WeightUnits
 from ..core.utils.json_serializer import CustomJsonEncoder
 from ..core.weight import zero_weight
@@ -29,14 +28,10 @@ from ..discount import DiscountValueType
 from ..discount.models import Voucher
 from ..giftcard.models import GiftCard
 from ..payment import ChargeStatus, TransactionKind
-from ..payment.model_helpers import (
-    get_subtotal,
-    get_total_authorized,
-    get_total_captured,
-)
+from ..payment.model_helpers import get_subtotal, get_total_authorized
 from ..payment.models import Payment
 from ..shipping.models import ShippingMethod
-from . import FulfillmentStatus, OrderEvents, OrderStatus
+from . import FulfillmentStatus, OrderEvents, OrderOrigin, OrderStatus
 
 
 class OrderQueryset(models.QuerySet):
@@ -112,6 +107,10 @@ class Order(ModelWithMetadata):
         Address, related_name="+", editable=False, null=True, on_delete=models.SET_NULL
     )
     user_email = models.EmailField(blank=True, default="")
+    original = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL
+    )
+    origin = models.CharField(max_length=32, choices=OrderOrigin.CHOICES)
 
     currency = models.CharField(
         max_length=settings.DEFAULT_CURRENCY_CODE_LENGTH,
@@ -210,6 +209,13 @@ class Order(ModelWithMetadata):
         currency_field="currency",
     )
 
+    total_paid_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        default=0,
+    )
+    total_paid = MoneyField(amount_field="total_paid_amount", currency_field="currency")
+
     voucher = models.ForeignKey(
         Voucher, blank=True, null=True, related_name="+", on_delete=models.SET_NULL
     )
@@ -236,29 +242,19 @@ class Order(ModelWithMetadata):
         return super().save(*args, **kwargs)
 
     def is_fully_paid(self):
-        total_paid = self._total_paid()
-        return total_paid.gross >= self.total.gross
+        return self.total_paid >= self.total.gross
 
     def is_partly_paid(self):
-        total_paid = self._total_paid()
-        return total_paid.gross.amount > 0
+        return self.total_paid_amount > 0
 
     def get_customer_email(self):
         return self.user.email if self.user else self.user_email
 
-    def _total_paid(self):
-        # Get total paid amount from partially charged,
-        # fully charged and partially refunded payments
-        payments = self.payments.filter(
-            charge_status__in=[
-                ChargeStatus.PARTIALLY_CHARGED,
-                ChargeStatus.FULLY_CHARGED,
-                ChargeStatus.PARTIALLY_REFUNDED,
-            ]
+    def update_total_paid(self):
+        self.total_paid_amount = (
+            sum(self.payments.values_list("captured_amount", flat=True)) or 0
         )
-        total_captured = [payment.get_captured_amount() for payment in payments]
-        total_paid = sum(total_captured, zero_taxed_money(currency=self.currency))
-        return total_paid
+        self.save(update_fields=["total_paid_amount"])
 
     def _index_billing_phone(self):
         return self.billing_address.phone
@@ -363,7 +359,7 @@ class Order(ModelWithMetadata):
 
     @property
     def total_captured(self):
-        return get_total_captured(self.payments.all(), self.currency)
+        return self.total_paid
 
     @property
     def total_balance(self):
