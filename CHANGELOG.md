@@ -102,12 +102,14 @@ All notable, unreleased changes to this project will be documented in this file.
 - Trigger `checkout_updated` hook for checkout meta mutations - #7392 by @maarcingebala
 - Optimize `inputType` resolver on `AttributeValue` type - 7396 by @tomaszszymanski129
 - Allow filtering pages by ids - #7393 by @IKarbowiak
+- Fix validate `min_spent` on vouchers to use net or gross value depends on `settings.display_gross_prices` - #7408 by @d-wysocki
 - Fix invoice generation - #7376 by tomaszszymanski129
 - Unify channel ID params #7378
   - targetChannel from ChannelDeleteInput changed to channelId
   - `channel` from `DraftOrderCreateInput` changed to channelId
   - `channel` from `DraftOrderInput` changed to channelId
   - `channel` from `pluginUpdate` changed to channelId
+- Order events performance - #7424 by tomaszszymanski129
 
 ### Breaking
 - Multichannel MVP: Multicurrency - #6242 by @fowczarek @d-wysocki
