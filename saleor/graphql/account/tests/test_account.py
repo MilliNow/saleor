@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 from collections import defaultdict
@@ -31,6 +32,7 @@ from ...tests.utils import (
     assert_graphql_error_with_message,
     assert_no_permission,
     get_graphql_content,
+    get_graphql_content_from_response,
     get_multipart_request_body,
 )
 from ..mutations.base import INVALID_TOKEN
@@ -608,6 +610,47 @@ def test_user_query_permission_manage_staff_get_staff(
     content = get_graphql_content(response)
     data = content["data"]["user"]
     assert staff_user.email == data["email"]
+
+
+@pytest.mark.parametrize("id", ["'", "abc"])
+def test_user_query_invalid_id(
+    id, staff_api_client, customer_user, permission_manage_users
+):
+    variables = {"id": id}
+    response = staff_api_client.post_graphql(
+        USER_QUERY, variables, permissions=[permission_manage_users]
+    )
+
+    content = get_graphql_content_from_response(response)
+    assert len(content["errors"]) == 1
+    assert content["errors"][0]["message"] == f"Couldn't resolve id: {id}."
+    assert content["data"]["user"] is None
+
+
+def test_user_query_object_with_given_id_does_not_exist(
+    staff_api_client, permission_manage_users
+):
+    id = graphene.Node.to_global_id("User", -1)
+    variables = {"id": id}
+    response = staff_api_client.post_graphql(
+        USER_QUERY, variables, permissions=[permission_manage_users]
+    )
+
+    content = get_graphql_content(response)
+    assert content["data"]["user"] is None
+
+
+def test_user_query_object_with_invalid_object_type(
+    staff_api_client, customer_user, permission_manage_users
+):
+    id = graphene.Node.to_global_id("Order", customer_user.pk)
+    variables = {"id": id}
+    response = staff_api_client.post_graphql(
+        USER_QUERY, variables, permissions=[permission_manage_users]
+    )
+
+    content = get_graphql_content(response)
+    assert content["data"]["user"] is None
 
 
 def test_query_customers(staff_api_client, user_api_client, permission_manage_users):
@@ -4021,6 +4064,11 @@ def test_user_avatar_update_mutation(monkeypatch, staff_api_client, media_root):
     assert data["user"]["avatar"]["url"].startswith(
         "http://testserver/media/user-avatars/avatar"
     )
+    img_name, format = os.path.splitext(image_file._name)
+    file_name = user.avatar.name
+    assert file_name != image_file._name
+    assert file_name.startswith(f"user-avatars/{img_name}")
+    assert file_name.endswith(format)
 
     # The image creation should have triggered a warm-up
     mock_create_thumbnails.assert_called_once_with(user_id=user.pk)
@@ -4282,13 +4330,11 @@ def test_query_customers_with_sort(
         ({"search": "example.com"}, 2),
         ({"search": "Alice"}, 1),
         ({"search": "Kowalski"}, 1),
-        ({"search": "John"}, 1),  # default_shipping_address__first_name
-        ({"search": "Doe"}, 1),  # default_shipping_address__last_name
-        ({"search": "wroc"}, 1),  # default_shipping_address__city
-        ({"search": "pl"}, 2),  # default_shipping_address__country, email
+        ({"search": "John"}, 1),  # first_name
+        ({"search": "Doe"}, 1),  # last_name
+        ({"search": "wroc"}, 1),  # city
+        ({"search": "pl"}, 1),  # country
         ({"search": "+48713988102"}, 1),
-        ({"search": "7139881"}, 1),
-        ({"search": "+48713"}, 1),
     ],
 )
 def test_query_customer_members_with_filter_search(
@@ -4300,8 +4346,7 @@ def test_query_customer_members_with_filter_search(
     address,
     staff_user,
 ):
-
-    User.objects.bulk_create(
+    users = User.objects.bulk_create(
         [
             User(
                 email="second@example.com",
@@ -4312,10 +4357,10 @@ def test_query_customer_members_with_filter_search(
             User(
                 email="third@example.com",
                 is_active=True,
-                default_shipping_address=address,
             ),
         ]
     )
+    users[1].addresses.set([address])
 
     variables = {"filter": customer_filter}
     response = staff_api_client.post_graphql(
@@ -4384,10 +4429,10 @@ def test_query_staff_members_app_no_permission(
         ({"search": "example.com"}, 3),
         ({"search": "Alice"}, 1),
         ({"search": "Kowalski"}, 1),
-        ({"search": "John"}, 1),  # default_shipping_address__first_name
-        ({"search": "Doe"}, 1),  # default_shipping_address__last_name
-        ({"search": "wroc"}, 1),  # default_shipping_address__city
-        ({"search": "pl"}, 3),  # default_shipping_address__country, email
+        ({"search": "John"}, 1),  # first_name
+        ({"search": "Doe"}, 1),  # last_name
+        ({"search": "wroc"}, 1),  # city
+        ({"search": "pl"}, 1),  # country
     ],
 )
 def test_query_staff_members_with_filter_search(
@@ -4399,7 +4444,7 @@ def test_query_staff_members_with_filter_search(
     address,
     staff_user,
 ):
-    User.objects.bulk_create(
+    users = User.objects.bulk_create(
         [
             User(
                 email="second@example.com",
@@ -4412,7 +4457,6 @@ def test_query_staff_members_with_filter_search(
                 email="third@example.com",
                 is_staff=True,
                 is_active=True,
-                default_shipping_address=address,
             ),
             User(
                 email="customer@example.com",
@@ -4423,6 +4467,7 @@ def test_query_staff_members_with_filter_search(
             ),
         ]
     )
+    users[1].addresses.set([address])
 
     variables = {"filter": staff_member_filter}
     response = staff_api_client.post_graphql(
@@ -4664,6 +4709,29 @@ def test_address_query_as_anonymous_user(api_client, address_other_country):
     variables = {"id": graphene.Node.to_global_id("Address", address_other_country.pk)}
     response = api_client.post_graphql(ADDRESS_QUERY, variables)
     assert_no_permission(response)
+
+
+def test_address_query_invalid_id(
+    staff_api_client,
+    address_other_country,
+):
+    id = "..afs"
+    variables = {"id": id}
+    response = staff_api_client.post_graphql(ADDRESS_QUERY, variables)
+    content = get_graphql_content_from_response(response)
+    assert len(content["errors"]) == 1
+    assert content["errors"][0]["message"] == f"Couldn't resolve id: {id}."
+    assert content["data"]["address"] is None
+
+
+def test_address_query_with_invalid_object_type(
+    staff_api_client,
+    address_other_country,
+):
+    variables = {"id": graphene.Node.to_global_id("Order", address_other_country.pk)}
+    response = staff_api_client.post_graphql(ADDRESS_QUERY, variables)
+    content = get_graphql_content(response)
+    assert content["data"]["address"] is None
 
 
 REQUEST_EMAIL_CHANGE_QUERY = """

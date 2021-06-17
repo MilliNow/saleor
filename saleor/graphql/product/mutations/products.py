@@ -41,8 +41,8 @@ from ...core.scalars import WeightScalar
 from ...core.types import SeoInput, Upload
 from ...core.types.common import CollectionError, ProductError
 from ...core.utils import (
+    add_hash_to_file_name,
     clean_seo_fields,
-    from_global_id_or_error,
     get_duplicated_values,
     validate_image_file,
     validate_slug_and_generate_if_needed,
@@ -111,7 +111,8 @@ class CategoryCreate(ModelMutation):
             cleaned_input["parent"] = parent
         if data.get("background_image"):
             image_data = info.context.FILES.get(data["background_image"])
-            validate_image_file(image_data, "background_image")
+            validate_image_file(image_data, "background_image", ProductErrorCode)
+            add_hash_to_file_name(image_data)
         clean_seo_fields(cleaned_input)
         return cleaned_input
 
@@ -217,7 +218,8 @@ class CollectionCreate(ModelMutation):
             raise ValidationError({"slug": error})
         if data.get("background_image"):
             image_data = info.context.FILES.get(data["background_image"])
-            validate_image_file(image_data, "background_image")
+            validate_image_file(image_data, "background_image", CollectionErrorCode)
+            add_hash_to_file_name(image_data)
         is_published = cleaned_input.get("is_published")
         publication_date = cleaned_input.get("publication_date")
         if is_published and not publication_date:
@@ -334,7 +336,7 @@ class CollectionReorderProducts(BaseMutation):
 
     @classmethod
     def perform_mutation(cls, _root, info, collection_id, moves):
-        _type, pk = from_global_id_or_error(
+        pk = cls.get_global_id_or_error(
             collection_id, only_type=Collection, field="collection_id"
         )
 
@@ -358,7 +360,7 @@ class CollectionReorderProducts(BaseMutation):
 
         # Resolve the products
         for move_info in moves:
-            _type, product_pk = from_global_id_or_error(
+            product_pk = cls.get_global_id_or_error(
                 move_info.product_id, only_type=Product, field="moves"
             )
 
@@ -807,7 +809,8 @@ class ProductVariantCreate(ModelMutation):
         if attribute_values in used_attribute_values:
             raise ValidationError(
                 "Duplicated attribute values for product variant.",
-                ProductErrorCode.DUPLICATED_INPUT_ITEM,
+                code=ProductErrorCode.DUPLICATED_INPUT_ITEM.value,
+                params={"attributes": attribute_values.keys()},
             )
         else:
             used_attribute_values.append(attribute_values)
@@ -1206,7 +1209,7 @@ class ProductTypeDelete(ModelDeleteMutation):
     @traced_atomic_transaction()
     def perform_mutation(cls, _root, info, **data):
         node_id = data.get("id")
-        _type, product_type_pk = from_global_id_or_error(
+        product_type_pk = cls.get_global_id_or_error(
             node_id, only_type=ProductType, field="pk"
         )
         variants_pks = models.Product.objects.filter(
@@ -1308,7 +1311,8 @@ class ProductMediaCreate(BaseMutation):
         media_url = data.get("media_url")
         if image:
             image_data = info.context.FILES.get(image)
-            validate_image_file(image_data, "image")
+            validate_image_file(image_data, "image", ProductErrorCode)
+            add_hash_to_file_name(image_data)
             media = product.media.create(
                 image=image_data, alt=alt, type=ProductMediaTypes.IMAGE
             )
@@ -1499,7 +1503,7 @@ class ProductVariantReorder(BaseMutation):
 
     @classmethod
     def perform_mutation(cls, _root, info, product_id, moves):
-        _type, pk = from_global_id_or_error(product_id, only_type=Product)
+        pk = cls.get_global_id_or_error(product_id, only_type=Product)
 
         try:
             product = models.Product.objects.prefetched_for_webhook().get(pk=pk)
@@ -1517,7 +1521,7 @@ class ProductVariantReorder(BaseMutation):
         operations = {}
 
         for move_info in moves:
-            _type, variant_pk = from_global_id_or_error(
+            variant_pk = cls.get_global_id_or_error(
                 move_info.id, only_type=ProductVariant, field="moves"
             )
 
